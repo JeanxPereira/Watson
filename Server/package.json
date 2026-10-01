@@ -1,14 +1,17 @@
 {
-  "name": "pcsx2-mcp-server",
-  "version": "2.0.0",
-  "description": "ULTIMATE PCSX2 Debugger MCP Server — custom C++ DebugServer plugin + Pine IPC",
+  "name": "watson-server",
+  "version": "0.1.0",
+  "description": "Watson MCP server: live PS2 witness over an instrumented PCSX2",
   "type": "module",
   "main": "dist/index.js",
-  "bin": { "pcsx2-mcp": "dist/index.js" },
+  "bin": {
+    "watson": "dist/index.js"
+  },
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "start": "node dist/index.js"
+    "start": "node dist/index.js",
+    "test": "npm run build && node --test tests/*.test.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",

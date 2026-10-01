@@ -129,6 +129,12 @@ export class DebugServerClient {
 
       this.socket.on('close', () => {
         this.connected = false;
+        if (this.pendingReject) {
+          const reject = this.pendingReject;
+          this.pendingResolve = null;
+          this.pendingReject = null;
+          reject(new Error('DebugServer connection closed'));
+        }
       });
     });
   }

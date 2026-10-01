@@ -1,2 +1,5 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Patches and scripts are applied byte for byte; a CRLF checkout breaks git apply.
+*.patch text eol=lf

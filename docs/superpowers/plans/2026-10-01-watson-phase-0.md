@@ -110,7 +110,7 @@ Desktop.ini
 
 - [ ] **Step 3: Write `README.md`**
 
-```markdown
+````markdown
 # Watson
 
 The live witness for PS2 reverse engineering: an instrumented PCSX2 and an MCP server that let
@@ -149,7 +149,7 @@ merged into this repository. It links into [PCSX2](https://github.com/PCSX2/pcsx
 Watson is licensed GPL-3.0, as PCSX2 is. `Emulator/DebugServer.cpp` and
 `Emulator/DebugServer.h` carry an `SPDX-License-Identifier: MIT` header from upstream while
 the upstream repository's `LICENSE` is GPL-3.0. The headers are kept as found.
-```
+````
 
 - [ ] **Step 4: Commit the import**
 
@@ -602,8 +602,8 @@ test('live: EE registers are readable through MCP', async (t) => {
   const regs = await client.callTool({ name: 'watson_read_registers', arguments: {} });
   await client.close();
   assert.ok(!regs.isError, regs.content[0].text);
-  assert.match(regs.content[0].text, /\bpc\b/i);
   assert.match(regs.content[0].text, /\bgp\b/i);
+  assert.match(regs.content[0].text, /\bsp\b/i);
 });
 ```
 

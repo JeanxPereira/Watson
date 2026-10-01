@@ -92,15 +92,16 @@ Watson/
   docs/
 ```
 
-Watson does not vendor PCSX2. `Emulator/upstream.json` pins one upstream commit, initially
-`8f4959708` (2026-07-20), the commit of the checkout already on this machine.
+Watson does not vendor PCSX2. `Emulator/upstream.json` pins one upstream tag and commit,
+initially `v2.9.94` (`81526d4dc7`, 2026-10-01), the latest upstream release when Watson began.
 `Build.ps1` clones that commit into `References/pcsx2`, copies the patch body, applies
 `hooks.patch`, and builds `pcsx2-qt` and `pcsx2-gsrunner`.
 
 ### Isolation from the user's PCSX2
 
-Watson launches PCSX2 with `-portable -datapath <Watson>/Runtime`, so it never reads or writes
-the configuration in `Documents/PCSX2`. Watson writes the settings it depends on into that
+Watson launches PCSX2 with `-datapath <Watson>/Runtime`, so it never reads or writes
+the configuration in `Documents/PCSX2`. It never passes `-portable`: portable mode takes
+priority over `-datapath` and would write next to the executable. Watson writes the settings it depends on into that
 runtime directory before each launch: software renderer (`Renderer = 13`), uncompressed GS
 dumps (`GSDumpCompression = Uncompressed`), the BIOS search path, and DebugServer enabled.
 
@@ -283,8 +284,8 @@ G3 is the gate that makes attribution trustworthy: two independent instruments, 
 | 3 | `watson.json`, identity, symbols, the answer contract on every tool, `gif_trace`. | Success criteria 3 and 4; gates G1 and G3 pass. |
 
 Phase 0 is the risk gate. The inherited patch was written against upstream of March 2026 and
-has not been built against the pinned July commit; neither has PCSX2 been built on this
-machine. If phase 0 does not close, phase 1 is still deliverable: it needs only
+has not been built against the pinned tag. PCSX2 itself was built on this machine in July
+2026 with the Visual Studio generator and MSVC, at an older commit. If phase 0 does not close, phase 1 is still deliverable: it needs only
 `pcsx2-gsrunner`, or, failing a local build, dumps rendered by a stock PCSX2.
 
 Each phase gets its own implementation plan.

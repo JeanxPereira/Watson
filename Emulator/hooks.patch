@@ -1,0 +1,50 @@
+diff --git a/pcsx2/CMakeLists.txt b/pcsx2/CMakeLists.txt
+index 4c8ce81..9a2b1cf 100644
+--- a/pcsx2/CMakeLists.txt
++++ b/pcsx2/CMakeLists.txt
+@@ -817,6 +817,7 @@ set(pcsx2DebugToolsSources
+ 	DebugTools/DisR5900asm.cpp
+ 	DebugTools/DisVU0Micro.cpp
+ 	DebugTools/DisVU1Micro.cpp
++	DebugTools/DebugServer.cpp
+ 	DebugTools/BiosDebugData.cpp)
+ 
+ # DebugTools headers
+@@ -835,6 +836,7 @@ set(pcsx2DebugToolsHeaders
+ 	DebugTools/DisASM.h
+ 	DebugTools/DisVUmicro.h
+ 	DebugTools/DisVUops.h
++	DebugTools/DebugServer.h
+ 	DebugTools/BiosDebugData.h)
+ 
+ set(pcsx2HostSources
+diff --git a/pcsx2/VMManager.cpp b/pcsx2/VMManager.cpp
+index 082d574..fa92749 100644
+--- a/pcsx2/VMManager.cpp
++++ b/pcsx2/VMManager.cpp
+@@ -8,6 +8,7 @@
+ #include "Counters.h"
+ #include "DEV9/DEV9.h"
+ #include "DebugTools/DebugInterface.h"
++#include "DebugTools/DebugServer.h"
+ #include "DebugTools/SymbolImporter.h"
+ #include "Elfheader.h"
+ #include "FW.h"
+@@ -428,6 +429,8 @@ bool VMManager::Internal::CPUThreadInitialize()
+ 
+ 	ReloadPINE();
+ 
++	DebugServer::Start();
++
+ 	if (EmuConfig.EnableDiscordPresence)
+ 		InitializeDiscordPresence();
+ 
+@@ -442,6 +445,8 @@ void VMManager::Internal::CPUThreadShutdown()
+ {
+ 	ShutdownDiscordPresence();
+ 
++	DebugServer::Stop();
++
+ 	PINEServer::Deinitialize();
+ 
+ 	Achievements::Shutdown(false);

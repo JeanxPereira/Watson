@@ -1,0 +1,6 @@
+{
+  "repository": "https://github.com/PCSX2/pcsx2.git",
+  "tag": "v2.9.94",
+  "commit": "81526d4dc7cc70e4ae75abb35a789417456c6d43",
+  "dependencies": "https://github.com/PCSX2/pcsx2-windows-dependencies/releases/download/latest-windows-dependencies/pcsx2-windows-dependencies.7z"
+}

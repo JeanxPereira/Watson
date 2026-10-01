@@ -48,7 +48,7 @@ if ($LASTEXITCODE -eq 0) {
 if ($PrepareOnly) { Write-Host 'prepared'; exit 0 }
 
 $Build = Join-Path $Tree 'build'
-Run cmake @('-S', $Tree, '-B', $Build, '-G', 'Visual Studio 18 2026', '-A', 'x64', "-DCMAKE_PREFIX_PATH=$(Join-Path $Tree 'deps')")
+Run cmake @('-S', $Tree, '-B', $Build, '-G', 'Visual Studio 18 2026', '-A', 'x64', '-DENABLE_GSRUNNER=ON', "-DCMAKE_PREFIX_PATH=$(Join-Path $Tree 'deps')")
 Run cmake @('--build', $Build, '--config', 'Release', '--target', 'pcsx2-qt', 'pcsx2-gsrunner')
 
 foreach ($Exe in 'pcsx2-qt\Release\pcsx2-qt.exe', 'pcsx2-gsrunner\Release\pcsx2-gsrunner.exe') {

@@ -1,16 +1,9 @@
 #!/usr/bin/env node
 /**
- * PCSX2 ULTIMATE MCP Server v2.0
- * 
- * 3-tier connection priority:
- *   1. Custom DebugServer (port 21512) — FULL 128-bit, native disasm, expressions, conditional BP
- *   2. Pine IPC (port 28011) — memory R/W, game info, save states (vanilla PCSX2)
- *   3. Standalone — PS2Recomp project tools only
- * 
- * 30+ tools across categories:
- *   Connection, Memory, Registers, Disassembly, Expression Eval,
- *   Breakpoints, Watchpoints, Stepping, Threads, Game Info,
- *   Save States, Pattern Search, Memory Diff, PS2Recomp Integration
+ * Watson MCP server.
+ *
+ * Connects to the DebugServer inside a Watson-built PCSX2 (port 21512), with Pine IPC
+ * (port 28011) as a fallback for memory and savestates.
  */
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -18,14 +11,11 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 import { DebugServerClient } from './debug-server-client.js';
 import { PineClient, EmuStatus } from './pine-client.js';
-import * as fs from 'node:fs';
-import * as path from 'node:path';
 
 // ===== State =====
 let debugServer: DebugServerClient | null = null;
 let pine: PineClient | null = null;
 const memSnapshots = new Map<string, { addr: number; data: Buffer }>();
-const PS2RECOMP_ROOT = process.env.PS2RECOMP_ROOT || 'E:\\Programmi VARI\\PROGETTI\\PS2Recomp';
 
 // ===== Helpers =====
 function parseAddr(s: string): number { return parseInt(s.replace(/^0x/i, ''), 16); }
@@ -54,7 +44,7 @@ function hasPine(): boolean { return pine?.isConnected() ?? false; }
 async function readMem(addr: number, len: number): Promise<Buffer> {
   if (hasDebug()) return debugServer!.readMemoryBuffer('0x' + addr.toString(16), len);
   if (hasPine()) return pine!.readMemory(addr, len);
-  throw new Error('No connection — use pcsx2_connect first');
+  throw new Error('No connection — use watson_connect first');
 }
 
 async function writeMem(addr: number, data: Buffer): Promise<void> {
@@ -64,12 +54,12 @@ async function writeMem(addr: number, data: Buffer): Promise<void> {
 }
 
 // ===== MCP Server =====
-const server = new McpServer({ name: 'pcsx2-ultimate-debugger', version: '2.0.0' }, { capabilities: { tools: {}, resources: {} } });
+const server = new McpServer({ name: 'watson', version: '0.1.0' }, { capabilities: { tools: {}, resources: {} } });
 
 // ==========================================================
-//  TOOL: pcsx2_connect
+//  TOOL: watson_connect
 // ==========================================================
-server.tool('pcsx2_connect',
+server.tool('watson_connect',
   'Connect to PCSX2. Tries DebugServer (21512), then Pine (28011). DebugServer gives FULL access (128-bit regs, expressions, conditional BP, native disasm). Pine gives memory + game info.',
   { debug_port: z.number().default(21512).describe('DebugServer port'), pine_port: z.number().default(28011).describe('Pine IPC port'), mode: z.enum(['auto', 'debug', 'pine']).default('auto') },
   async ({ debug_port, pine_port, mode }) => {
@@ -109,9 +99,9 @@ server.tool('pcsx2_connect',
 );
 
 // ==========================================================
-//  TOOL: pcsx2_status
+//  TOOL: watson_status
 // ==========================================================
-server.tool('pcsx2_status', 'Get connection + emulator status.', {},
+server.tool('watson_status', 'Get connection + emulator status.', {},
   async () => {
     const p: string[] = [];
     p.push(`DebugServer: ${hasDebug() ? '✅ connected' : '❌ not connected'}`);
@@ -127,9 +117,9 @@ server.tool('pcsx2_status', 'Get connection + emulator status.', {},
 );
 
 // ==========================================================
-//  TOOL: pcsx2_read_memory
+//  TOOL: watson_read_memory
 // ==========================================================
-server.tool('pcsx2_read_memory', 'Read PS2 memory. Returns hex dump.',
+server.tool('watson_read_memory', 'Read PS2 memory. Returns hex dump.',
   { address: z.string(), length: z.number().min(1).max(4096).default(256), format: z.enum(['hexdump', 'hex', 'u32_array', 'ascii']).default('hexdump') },
   async ({ address, length, format }) => {
     try {
@@ -149,9 +139,9 @@ server.tool('pcsx2_read_memory', 'Read PS2 memory. Returns hex dump.',
 );
 
 // ==========================================================
-//  TOOL: pcsx2_write_memory
+//  TOOL: watson_write_memory
 // ==========================================================
-server.tool('pcsx2_write_memory', 'Write hex data to PS2 memory. USE WITH CAUTION.',
+server.tool('watson_write_memory', 'Write hex data to PS2 memory. USE WITH CAUTION.',
   { address: z.string(), data: z.string().describe('Hex data e.g. "0102030405"') },
   async ({ address, data }) => {
     try {
@@ -164,9 +154,9 @@ server.tool('pcsx2_write_memory', 'Write hex data to PS2 memory. USE WITH CAUTIO
 );
 
 // ==========================================================
-//  TOOL: pcsx2_read_string  
+//  TOOL: watson_read_string  
 // ==========================================================
-server.tool('pcsx2_read_string', 'Read null-terminated string from PS2 memory.',
+server.tool('watson_read_string', 'Read null-terminated string from PS2 memory.',
   { address: z.string(), max_length: z.number().default(256) },
   async ({ address, max_length }) => {
     try {
@@ -184,9 +174,9 @@ server.tool('pcsx2_read_string', 'Read null-terminated string from PS2 memory.',
 );
 
 // ==========================================================
-//  TOOL: pcsx2_read_registers (DebugServer - FULL 128-bit!)
+//  TOOL: watson_read_registers (DebugServer - FULL 128-bit!)
 // ==========================================================
-server.tool('pcsx2_read_registers',
+server.tool('watson_read_registers',
   'Read ALL EE registers — FULL 128-bit values. Categories: GPR, CP0, FPR, FCR, VU0F, VU0I, GSPRIV. Requires DebugServer.',
   { category: z.number().min(-1).max(6).default(-1).describe('-1 for all, 0=GPR, 1=CP0, 2=FPR, 3=FCR, 4=VU0F, 5=VU0I, 6=GSPRIV'), cpu: z.enum(['ee', 'iop']).default('ee') },
   async ({ category, cpu }) => {
@@ -215,9 +205,9 @@ server.tool('pcsx2_read_registers',
 );
 
 // ==========================================================
-//  TOOL: pcsx2_write_register
+//  TOOL: watson_write_register
 // ==========================================================
-server.tool('pcsx2_write_register', 'Write a register value (supports full 128-bit hex). Requires DebugServer.',
+server.tool('watson_write_register', 'Write a register value (supports full 128-bit hex). Requires DebugServer.',
   { category: z.number().default(0).describe('0=GPR, 1=CP0, 2=FPR, etc.'), index: z.number().describe('Register index within category'), value: z.string().describe('Hex value (up to 128-bit)'), cpu: z.enum(['ee', 'iop']).default('ee') },
   async ({ category, index, value, cpu }) => {
     if (!hasDebug()) return { content: [{ type: 'text' as const, text: 'Error: DebugServer not connected.' }], isError: true };
@@ -229,9 +219,9 @@ server.tool('pcsx2_write_register', 'Write a register value (supports full 128-b
 );
 
 // ==========================================================
-//  TOOL: pcsx2_disassemble (NATIVE PCSX2!)  
+//  TOOL: watson_disassemble (NATIVE PCSX2!)  
 // ==========================================================
-server.tool('pcsx2_disassemble', 'Disassemble MIPS instructions using PCSX2\'s NATIVE disassembler — perfect output. Requires DebugServer.',
+server.tool('watson_disassemble', 'Disassemble MIPS instructions using PCSX2\'s NATIVE disassembler — perfect output. Requires DebugServer.',
   { address: z.string(), count: z.number().min(1).max(200).default(20), cpu: z.enum(['ee', 'iop']).default('ee') },
   async ({ address, count, cpu }) => {
     if (!hasDebug()) return { content: [{ type: 'text' as const, text: 'Error: DebugServer not connected.' }], isError: true };
@@ -244,9 +234,9 @@ server.tool('pcsx2_disassemble', 'Disassemble MIPS instructions using PCSX2\'s N
 );
 
 // ==========================================================
-//  TOOL: pcsx2_evaluate (EXPRESSION EVAL!)
+//  TOOL: watson_evaluate (EXPRESSION EVAL!)
 // ==========================================================
-server.tool('pcsx2_evaluate', 'Evaluate a MIPS expression with full symbol support. Examples: "v0 + 0x100", "gp + 0x20", "sp - 4". Requires DebugServer.',
+server.tool('watson_evaluate', 'Evaluate a MIPS expression with full symbol support. Examples: "v0 + 0x100", "gp + 0x20", "sp - 4". Requires DebugServer.',
   { expression: z.string().describe('Expression to evaluate'), cpu: z.enum(['ee', 'iop']).default('ee') },
   async ({ expression, cpu }) => {
     if (!hasDebug()) return { content: [{ type: 'text' as const, text: 'Error: DebugServer not connected.' }], isError: true };
@@ -259,9 +249,9 @@ server.tool('pcsx2_evaluate', 'Evaluate a MIPS expression with full symbol suppo
 );
 
 // ==========================================================
-//  TOOL: pcsx2_set_breakpoint (with CONDITIONAL!)
+//  TOOL: watson_set_breakpoint (with CONDITIONAL!)
 // ==========================================================
-server.tool('pcsx2_set_breakpoint', 'Set a breakpoint at an address. Supports conditional expressions! Requires DebugServer.',
+server.tool('watson_set_breakpoint', 'Set a breakpoint at an address. Supports conditional expressions! Requires DebugServer.',
   { address: z.string(), condition: z.string().optional().describe('Break only when expression is true, e.g. "v0 == 0x42"'), description: z.string().optional(), temporary: z.boolean().default(false) },
   async ({ address, condition, description, temporary }) => {
     if (!hasDebug()) return { content: [{ type: 'text' as const, text: 'Error: DebugServer not connected.' }], isError: true };
@@ -274,7 +264,7 @@ server.tool('pcsx2_set_breakpoint', 'Set a breakpoint at an address. Supports co
   }
 );
 
-server.tool('pcsx2_remove_breakpoint', 'Remove a breakpoint.',
+server.tool('watson_remove_breakpoint', 'Remove a breakpoint.',
   { address: z.string() },
   async ({ address }) => {
     if (!hasDebug()) return { content: [{ type: 'text' as const, text: 'Error: DebugServer not connected.' }], isError: true };
@@ -283,7 +273,7 @@ server.tool('pcsx2_remove_breakpoint', 'Remove a breakpoint.',
   }
 );
 
-server.tool('pcsx2_list_breakpoints', 'List all breakpoints with their conditions and hit status.',
+server.tool('watson_list_breakpoints', 'List all breakpoints with their conditions and hit status.',
   {},
   async () => {
     if (!hasDebug()) return { content: [{ type: 'text' as const, text: 'Error: DebugServer not connected.' }], isError: true };
@@ -303,9 +293,9 @@ server.tool('pcsx2_list_breakpoints', 'List all breakpoints with their condition
 );
 
 // ==========================================================
-//  TOOL: pcsx2_set_watchpoint (with onChange!)
+//  TOOL: watson_set_watchpoint (with onChange!)
 // ==========================================================
-server.tool('pcsx2_set_watchpoint', 'Set a memory watchpoint. Supports read/write/access/onchange + optional condition expression!',
+server.tool('watson_set_watchpoint', 'Set a memory watchpoint. Supports read/write/access/onchange + optional condition expression!',
   { address: z.string(), end: z.string().optional().describe('End address (default: address+4)'), type: z.enum(['read', 'write', 'readwrite', 'onchange']).default('write'), action: z.enum(['break', 'log', 'both']).default('break'), condition: z.string().optional(), description: z.string().optional() },
   async ({ address, end, type, action, condition, description }) => {
     if (!hasDebug()) return { content: [{ type: 'text' as const, text: 'Error: DebugServer not connected.' }], isError: true };
@@ -317,7 +307,7 @@ server.tool('pcsx2_set_watchpoint', 'Set a memory watchpoint. Supports read/writ
   }
 );
 
-server.tool('pcsx2_remove_watchpoint', 'Remove a memory watchpoint.',
+server.tool('watson_remove_watchpoint', 'Remove a memory watchpoint.',
   { address: z.string(), end: z.string().optional() },
   async ({ address, end }) => {
     if (!hasDebug()) return { content: [{ type: 'text' as const, text: 'Error: DebugServer not connected.' }], isError: true };
@@ -329,7 +319,7 @@ server.tool('pcsx2_remove_watchpoint', 'Remove a memory watchpoint.',
   }
 );
 
-server.tool('pcsx2_list_watchpoints', 'List all memory watchpoints with hit counts.',
+server.tool('watson_list_watchpoints', 'List all memory watchpoints with hit counts.',
   {},
   async () => {
     if (!hasDebug()) return { content: [{ type: 'text' as const, text: 'Error: DebugServer not connected.' }], isError: true };
@@ -343,9 +333,9 @@ server.tool('pcsx2_list_watchpoints', 'List all memory watchpoints with hit coun
 );
 
 // ==========================================================
-//  TOOL: pcsx2_step / step_over / continue / pause
+//  TOOL: watson_step / step_over / continue / pause
 // ==========================================================
-server.tool('pcsx2_step', 'Execute one MIPS instruction. Returns new PC + native disasm. Requires DebugServer.',
+server.tool('watson_step', 'Execute one MIPS instruction. Returns new PC + native disasm. Requires DebugServer.',
   { count: z.number().min(1).max(100).default(1), show_registers: z.boolean().default(false) },
   async ({ count, show_registers }) => {
     if (!hasDebug()) return { content: [{ type: 'text' as const, text: 'Error: DebugServer not connected.' }], isError: true };
@@ -366,7 +356,7 @@ server.tool('pcsx2_step', 'Execute one MIPS instruction. Returns new PC + native
   }
 );
 
-server.tool('pcsx2_step_over', 'Step OVER a JAL/JALR call — like "next" in a debugger. Requires DebugServer.',
+server.tool('watson_step_over', 'Step OVER a JAL/JALR call — like "next" in a debugger. Requires DebugServer.',
   {},
   async () => {
     if (!hasDebug()) return { content: [{ type: 'text' as const, text: 'Error: DebugServer not connected.' }], isError: true };
@@ -377,16 +367,16 @@ server.tool('pcsx2_step_over', 'Step OVER a JAL/JALR call — like "next" in a d
   }
 );
 
-server.tool('pcsx2_continue', 'Resume execution until breakpoint or halt.',
+server.tool('watson_continue', 'Resume execution until breakpoint or halt.',
   {},
   async () => {
     if (!hasDebug()) return { content: [{ type: 'text' as const, text: 'Error: DebugServer not connected.' }], isError: true };
-    try { await debugServer!.resume(); return { content: [{ type: 'text' as const, text: 'Resumed. Use pcsx2_pause to stop.' }] }; }
+    try { await debugServer!.resume(); return { content: [{ type: 'text' as const, text: 'Resumed. Use watson_pause to stop.' }] }; }
     catch (e: any) { return { content: [{ type: 'text' as const, text: `Error: ${e.message}` }], isError: true }; }
   }
 );
 
-server.tool('pcsx2_pause', 'Pause/halt the emulator. Returns current PC.',
+server.tool('watson_pause', 'Pause/halt the emulator. Returns current PC.',
   {},
   async () => {
     if (!hasDebug()) return { content: [{ type: 'text' as const, text: 'Error: DebugServer not connected.' }], isError: true };
@@ -396,9 +386,9 @@ server.tool('pcsx2_pause', 'Pause/halt the emulator. Returns current PC.',
 );
 
 // ==========================================================
-//  TOOL: pcsx2_get_threads / pcsx2_get_modules
+//  TOOL: watson_get_threads / watson_get_modules
 // ==========================================================
-server.tool('pcsx2_get_threads', 'List EE/IOP BIOS threads with their status.',
+server.tool('watson_get_threads', 'List EE/IOP BIOS threads with their status.',
   { cpu: z.enum(['ee', 'iop']).default('ee') },
   async ({ cpu }) => {
     if (!hasDebug()) return { content: [{ type: 'text' as const, text: 'Error: DebugServer not connected.' }], isError: true };
@@ -411,7 +401,7 @@ server.tool('pcsx2_get_threads', 'List EE/IOP BIOS threads with their status.',
   }
 );
 
-server.tool('pcsx2_get_modules', 'List loaded IOP modules.',
+server.tool('watson_get_modules', 'List loaded IOP modules.',
   {},
   async () => {
     if (!hasDebug()) return { content: [{ type: 'text' as const, text: 'Error: DebugServer not connected.' }], isError: true };
@@ -424,9 +414,9 @@ server.tool('pcsx2_get_modules', 'List loaded IOP modules.',
 );
 
 // ==========================================================
-//  TOOL: pcsx2_get_backtrace
+//  TOOL: watson_get_backtrace
 // ==========================================================
-server.tool('pcsx2_get_backtrace', 'Get call stack backtrace (stack walk). Shows function entry points, PCs, stack pointers, and disassembly for each frame. Requires DebugServer + paused state.',
+server.tool('watson_get_backtrace', 'Get call stack backtrace (stack walk). Shows function entry points, PCs, stack pointers, and disassembly for each frame. Requires DebugServer + paused state.',
   { cpu: z.enum(['ee', 'iop']).default('ee'), max_frames: z.number().min(1).max(128).default(32) },
   async ({ cpu, max_frames }) => {
     if (!hasDebug()) return { content: [{ type: 'text' as const, text: 'Error: DebugServer not connected.' }], isError: true };
@@ -440,9 +430,9 @@ server.tool('pcsx2_get_backtrace', 'Get call stack backtrace (stack walk). Shows
 );
 
 // ==========================================================
-//  TOOL: pcsx2_game_info / save_state / load_state (Pine)
+//  TOOL: watson_game_info / save_state / load_state (Pine)
 // ==========================================================
-server.tool('pcsx2_game_info', 'Get game title, ID, version from PCSX2. Requires Pine.',
+server.tool('watson_game_info', 'Get game title, ID, version from PCSX2. Requires Pine.',
   {},
   async () => {
     if (!hasPine()) return { content: [{ type: 'text' as const, text: 'Error: Pine not connected.' }], isError: true };
@@ -453,7 +443,7 @@ server.tool('pcsx2_game_info', 'Get game title, ID, version from PCSX2. Requires
   }
 );
 
-server.tool('pcsx2_save_state', 'Save emulator state. Requires Pine.', { slot: z.number().min(0).max(9) },
+server.tool('watson_save_state', 'Save emulator state. Requires Pine.', { slot: z.number().min(0).max(9) },
   async ({ slot }) => {
     if (!hasPine()) return { content: [{ type: 'text' as const, text: 'Pine not connected.' }], isError: true };
     try { await pine!.saveState(slot); return { content: [{ type: 'text' as const, text: `Saved to slot ${slot}` }] }; }
@@ -461,7 +451,7 @@ server.tool('pcsx2_save_state', 'Save emulator state. Requires Pine.', { slot: z
   }
 );
 
-server.tool('pcsx2_load_state', 'Load emulator state. Requires Pine.', { slot: z.number().min(0).max(9) },
+server.tool('watson_load_state', 'Load emulator state. Requires Pine.', { slot: z.number().min(0).max(9) },
   async ({ slot }) => {
     if (!hasPine()) return { content: [{ type: 'text' as const, text: 'Pine not connected.' }], isError: true };
     try { await pine!.loadState(slot); return { content: [{ type: 'text' as const, text: `Loaded from slot ${slot}` }] }; }
@@ -470,9 +460,9 @@ server.tool('pcsx2_load_state', 'Load emulator state. Requires Pine.', { slot: z
 );
 
 // ==========================================================
-//  TOOL: pcsx2_find_pattern
+//  TOOL: watson_find_pattern
 // ==========================================================
-server.tool('pcsx2_find_pattern', 'Search PS2 memory for a hex pattern. Use ?? for wildcards.',
+server.tool('watson_find_pattern', 'Search PS2 memory for a hex pattern. Use ?? for wildcards.',
   { pattern: z.string(), start: z.string().default('0x00100000'), end: z.string().default('0x02000000'), max_results: z.number().default(20) },
   async ({ pattern, start, end, max_results }) => {
     try {
@@ -499,9 +489,9 @@ server.tool('pcsx2_find_pattern', 'Search PS2 memory for a hex pattern. Use ?? f
 );
 
 // ==========================================================
-//  TOOL: pcsx2_memory_diff
+//  TOOL: watson_memory_diff
 // ==========================================================
-server.tool('pcsx2_memory_diff', 'Snapshot-and-compare memory. First call = snapshot, second = diff.',
+server.tool('watson_memory_diff', 'Snapshot-and-compare memory. First call = snapshot, second = diff.',
   { address: z.string(), length: z.number().default(256), name: z.string().default('default') },
   async ({ address, length, name }) => {
     try {
@@ -525,62 +515,14 @@ server.tool('pcsx2_memory_diff', 'Snapshot-and-compare memory. First call = snap
 );
 
 // ==========================================================
-//  TOOL: pcsx2_clear_all_breakpoints
+//  TOOL: watson_clear_all_breakpoints
 // ==========================================================
-server.tool('pcsx2_clear_all_breakpoints', 'Clear ALL breakpoints and watchpoints.',
+server.tool('watson_clear_all_breakpoints', 'Clear ALL breakpoints and watchpoints.',
   {},
   async () => {
     if (!hasDebug()) return { content: [{ type: 'text' as const, text: 'Error: DebugServer not connected.' }], isError: true };
     try { await debugServer!.clearAllBreakpoints(); return { content: [{ type: 'text' as const, text: 'All breakpoints and watchpoints cleared.' }] }; }
     catch (e: any) { return { content: [{ type: 'text' as const, text: `Error: ${e.message}` }], isError: true }; }
-  }
-);
-
-// ==========================================================
-//  PS2Recomp Integration Tools
-// ==========================================================
-server.tool('ps2recomp_lookup_function', 'Search PS2Recomp project for functions by address or name.',
-  { query: z.string() },
-  async ({ query }) => {
-    try {
-      const results: string[] = [];
-      const overDir = path.join(PS2RECOMP_ROOT, 'ps2xRuntime', 'src', 'lib', 'overrides');
-      if (fs.existsSync(overDir)) {
-        for (const f of fs.readdirSync(overDir).filter(f => f.endsWith('.cpp'))) {
-          if (f.toLowerCase().includes(query.toLowerCase().replace(/^0x/, ''))) {
-            const c = fs.readFileSync(path.join(overDir, f), 'utf8');
-            const m = c.match(/RECOMP_FUNC\s+(\w+)/);
-            results.push(`Override: ${f}${m ? ` → ${m[1]}` : ''}`);
-          }
-        }
-      }
-      for (const d of ['configs', 'config']) {
-        const dir = path.join(PS2RECOMP_ROOT, d);
-        if (!fs.existsSync(dir)) continue;
-        for (const f of fs.readdirSync(dir, { recursive: true }).filter((f): f is string => typeof f === 'string' && f.endsWith('.toml'))) {
-          const c = fs.readFileSync(path.join(dir, f), 'utf8');
-          if (c.toLowerCase().includes(query.toLowerCase())) {
-            const lines = c.split('\n').filter(l => l.toLowerCase().includes(query.toLowerCase()));
-            results.push(`Config: ${f}`);
-            lines.slice(0, 3).forEach(l => results.push(`  ${l.trim()}`));
-          }
-        }
-      }
-      return { content: [{ type: 'text' as const, text: results.length > 0 ? results.join('\n') : `No results for "${query}"` }] };
-    } catch (e: any) { return { content: [{ type: 'text' as const, text: `Error: ${e.message}` }], isError: true }; }
-  }
-);
-
-server.tool('ps2recomp_list_overrides', 'List all PS2Recomp function overrides.',
-  {},
-  async () => {
-    try {
-      const dir = path.join(PS2RECOMP_ROOT, 'ps2xRuntime', 'src', 'lib', 'overrides');
-      if (!fs.existsSync(dir)) return { content: [{ type: 'text' as const, text: 'Override dir not found' }], isError: true };
-      const files = fs.readdirSync(dir).filter(f => f.endsWith('.cpp')).sort();
-      const lines = files.map(f => { const m = f.match(/0x([0-9a-fA-F]+)/); return `  ${m ? '0x' + m[1] : '?'.padEnd(12)} ${f}`; });
-      return { content: [{ type: 'text' as const, text: `${files.length} overrides:\n${lines.join('\n')}` }] };
-    } catch (e: any) { return { content: [{ type: 'text' as const, text: `Error: ${e.message}` }], isError: true }; }
   }
 );
 
@@ -599,7 +541,6 @@ server.resource('debug_protocol', 'ps2://debug_protocol', async () => ({
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error('PCSX2 ULTIMATE MCP Server v2.0 running');
-  console.error(`PS2Recomp root: ${PS2RECOMP_ROOT}`);
+  console.error('Watson MCP server running');
 }
 main().catch(e => { console.error('Fatal:', e); process.exit(1); });

@@ -232,6 +232,19 @@ not:
 A capture where each origin feeds exactly one packet, and every chunk lies inside its origin's
 `MADR` range, is free of the first and third; the clock capture is.
 
+Probes (plan `2026-10-02-watson-probes.md`). A trace can carry up to 32 probes. A probe is a
+program counter and up to 8 memory ranges; every time the EE interpreter is about to execute
+the instruction there, a `probe` record is written, in order with the packets: the 32 general
+registers (low 32 bits), the 32 FPU registers (raw bits), and each range's bytes. A range is
+`[*]base[+hex]:hexlength`, base being a register name or a hex address, `*` following the
+32-bit pointer found there; a range that is not in EE RAM or the scratchpad is recorded as not
+readable and the trace goes on. A malformed probe refuses the whole trace.
+
+A probe is how arithmetic read from disassembly becomes a measured fact: probe the function's
+entry for its real inputs, recompute the output with the formula read, and compare with the
+packet that follows in the same trace. The EE cuts single-precision results toward zero; a
+recomputation that rounds to nearest is off by one unit in a fraction of a percent of values.
+
 Cost: with a trace running, every DMA start walks the EE stack, about 3 ms each. The OSDSYS
 clock starts 677 per frame, so a traced frame takes about 2 s. `frame_advance` allows 20 s per
 frame while a trace runs.
@@ -352,7 +365,8 @@ does not need the first, and the GS privileged registers are already category 6 
 
 Phase 3 was split. `gif_trace` and gate G3 were delivered by plan
 `2026-10-02-watson-gif-trace.md`. Build identity by fingerprint, symbols, and the answer
-contract on every tool (success criterion 4, gate G1) are still owed and get their own plan.
+contract on every tool (success criterion 4, gate G1) are still owed and get their own plan. Probes were added to the trace by plan
+`2026-10-02-watson-probes.md`.
 
 ## 11. Open questions resolved by phase 0 and 1, not by assumption
 

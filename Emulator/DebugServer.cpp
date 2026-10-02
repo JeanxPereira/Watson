@@ -54,6 +54,7 @@ typedef int socket_t;
 #include "Counters.h"
 #include "MTGS.h"
 #include "GS/GS.h"
+#include "GS/Renderers/Common/GSRenderer.h"
 #include "SIO/Pad/Pad.h"
 #include "SIO/Pad/PadDualshock2.h"
 #include "common/Error.h"
@@ -959,13 +960,63 @@ namespace DebugServer
 			j.kv("ok", true);
 			j.endObject();
 		}
+		// ----- CPU MODE -----
+		else if (cmd == "set_cpu_mode")
+		{
+			// Interpreters or recompilers, switched while the VM runs: the CPUs are swapped at the next
+			// execution slice, the machine state is kept.
+			const std::string mode = getStr(params, "mode", "");
+			if (mode != "interpreter" && mode != "recompiler")
+				return errorReply("mode must be interpreter or recompiler");
+			if (GifTrace::g_active)
+				return errorReply("a trace is being recorded; stop it first");
+			const bool rec = mode == "recompiler";
+			for (const char* key : {"EnableEE", "EnableVU0", "EnableVU1"})
+				Host::SetBaseBoolSettingValue("EmuCore/CPU/Recompiler", key, rec);
+			Host::CommitBaseSettingChanges();
+			VMManager::ApplySettings();
+			j.startObject();
+			j.kv("ok", true);
+			j.kv("interpreter", !CHECK_EEREC);
+			j.endObject();
+		}
+		// ----- GS MEMORY -----
+		else if (cmd == "gs_read")
+		{
+			// The bytes of GS local memory, from `offset` (bytes) for `length`, written raw to `path`.
+			// The GS thread is drained first, so everything sent so far has been drawn. Only the
+			// software renderer keeps this memory current.
+			const std::string path = wirePath(params, "path");
+			const int64_t offset = getNum(params, "offset", 0);
+			const int64_t length = getNum(params, "length", 4 * 1024 * 1024);
+			if (path.empty())
+				return errorReply("path is required");
+			if (offset < 0 || length <= 0 || offset + length > 4 * 1024 * 1024)
+				return errorReply("offset and length must lie inside the 4 MB of GS memory");
+			if (!g_gs_renderer)
+				return errorReply("no GS renderer is running");
+			MTGS::WaitGS(false);
+			std::FILE* file = FileSystem::OpenCFile(path.c_str(), "wb");
+			if (!file)
+				return errorReply("cannot open " + path);
+			const u8* base = g_gs_renderer->m_mem.vm8() + offset;
+			const bool written = std::fwrite(base, 1, (size_t)length, file) == (size_t)length;
+			std::fclose(file);
+			if (!written)
+				return errorReply("writing " + path + " failed");
+			j.startObject();
+			j.kv("ok", true);
+			j.kv("renderer", (int64_t)EmuConfig.GS.Renderer);
+			j.kv("bytes", length);
+			j.endObject();
+		}
 		// ----- GIF TRACE -----
 		else if (cmd == "gif_trace_start")
 		{
 			const std::string path = wirePath(params, "path");
 			if (path.empty())
 				return errorReply("path is required");
-			const std::string refused = GifTrace::Start(path, getStr(params, "probes", ""));
+			const std::string refused = GifTrace::Start(path, getStr(params, "probes", ""), getStr(params, "mode", "") == "recompiler", getStr(params, "mode", "") == "");
 			if (!refused.empty())
 				return errorReply(refused);
 			j.startObject();
@@ -1000,7 +1051,7 @@ namespace DebugServer
 				"get_threads", "get_modules",
 				"is_valid_address", "clear_breakpoints",
 				"frame_advance", "pad_set", "queue_snapshot", "save_state_file", "load_state_file",
-				"gif_trace_start", "gif_trace_stop"
+				"gif_trace_start", "gif_trace_stop", "gs_read", "set_cpu_mode"
 			};
 			for (const char* c : cmds) j.valStr(c);
 			j.endArray();
@@ -1068,39 +1119,52 @@ namespace DebugServer
 		auto first = std::make_shared<u32>(0);
 		const CpuRun armed = runOnCpuThread([count, first]() {
 			*first = g_FrameCount;
+			CBreakPoints::SetBreakpointTriggered(false);
 			VMManager::FrameAdvance(count);
 		});
 		if (armed != CpuRun::Done)
 			return errorReply(cpuRunFailure(armed, "frame_advance"));
-
-		// FrameAdvance switched the VM to Running on the CPU thread; it pauses itself after the
-		// last frame. Allow real time for slow frames: interpreted ones are slower, and a traced
-		// frame walks the stack at every DMA start (about 2 s per frame on the OSDSYS clock).
-		const int perFrame = GifTrace::g_active ? 20000 : (GifTrace::InterpretersActive() ? 2000 : 100);
-		const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000 + (int)count * perFrame);
-		while (std::chrono::steady_clock::now() < deadline)
+		for (int resumed = 0;; resumed++)
 		{
-			if (!s_running.load())
-				return errorReply("the server is stopping");
-			if (!VMManager::HasValidVM())
-				return errorReply("the VM stopped during frame_advance");
-			if (VMManager::GetState() == VMState::Paused)
-				break;
-			std::this_thread::sleep_for(std::chrono::milliseconds(2));
-		}
-		if (VMManager::GetState() != VMState::Paused)
-			return errorReply("the VM did not pause after frame_advance");
+			// FrameAdvance switched the VM to Running on the CPU thread; it pauses itself after the
+			// last frame. Allow real time for slow frames: interpreted ones are slower, and a traced
+			// frame walks the stack at every DMA start (about 2 s per frame on the OSDSYS clock).
+			const int perFrame = GifTrace::g_active ? 20000 : (GifTrace::InterpretersActive() ? 2000 : 100);
+			const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000 + (int)count * perFrame);
+			while (std::chrono::steady_clock::now() < deadline)
+			{
+				if (!s_running.load())
+					return errorReply("the server is stopping");
+				if (!VMManager::HasValidVM())
+					return errorReply("the VM stopped during frame_advance");
+				if (VMManager::GetState() == VMState::Paused)
+					break;
+				std::this_thread::sleep_for(std::chrono::milliseconds(2));
+			}
+			if (VMManager::GetState() != VMState::Paused)
+				return errorReply("the VM did not pause after frame_advance");
 
-		// A breakpoint or a watchpoint also pauses the VM. PCSX2 keeps the frames that were not
-		// run armed, so the next resume pauses again after them; the caller has to know.
-		const u32 ran = g_FrameCount - *first;
-		if (ran < count)
-		{
-			char pc[16];
-			snprintf(pc, sizeof(pc), "0x%08x", cpu->getPC());
-			return errorReply("stopped after " + std::to_string(ran) + " of " + std::to_string(count) +
-				" frames at pc " + pc + ", by a breakpoint or watchpoint; " + std::to_string(count - ran) +
-				" frames remain armed and the next resume will pause after them");
+			// A breakpoint or a watchpoint also pauses the VM. PCSX2 keeps the frames that were not
+			// run armed, so the next resume pauses again after them; the caller has to know. Any other
+			// pause (a pause request that arrived late) is not the caller's: the frames left are run.
+			const u32 ran = g_FrameCount - *first;
+			if (ran < count && !CBreakPoints::GetBreakpointTriggered() && resumed < 8)
+			{
+				const u32 left = count - ran;
+				const CpuRun again = runOnCpuThread([left]() { VMManager::FrameAdvance(left); });
+				if (again != CpuRun::Done)
+					return errorReply(cpuRunFailure(again, "frame_advance"));
+				continue;
+			}
+			if (ran < count)
+			{
+				char pc[16];
+				snprintf(pc, sizeof(pc), "0x%08x", cpu->getPC());
+				return errorReply("stopped after " + std::to_string(ran) + " of " + std::to_string(count) +
+					" frames at pc " + pc + ", by a breakpoint or watchpoint; " + std::to_string(count - ran) +
+					" frames remain armed and the next resume will pause after them");
+			}
+			break;
 		}
 
 		JsonBuilder j;
@@ -1144,11 +1208,12 @@ namespace DebugServer
 		// The VM can stop between the check above and the moment the CPU thread gets to this
 		// command, so the CPU thread checks again before touching anything.
 		auto reply = std::make_shared<std::string>();
+		const int patience = (cmd == "pause" || cmd == "resume" || cmd == "gs_read" || cmd == "set_cpu_mode") ? 60000 : 5000;
 		const CpuRun ran = runOnCpuThread([jsonLine, cmd, reply]() {
 			*reply = VMManager::HasValidVM()
 				? handleOnCpuThread(jsonLine)
 				: errorReply("no VM is running; boot one before sending " + cmd);
-		});
+		}, patience);
 		return ran == CpuRun::Done ? *reply : errorReply(cpuRunFailure(ran, cmd));
 	}
 

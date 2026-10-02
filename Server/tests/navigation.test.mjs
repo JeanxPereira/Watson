@@ -211,3 +211,14 @@ test('takeGifTrace touches no button when none is asked for', async () => {
   await takeGifTrace(emulator, png, 1);
   assert.equal(emulator.calls.filter((call) => call[0] === 'padSet').length, 0);
 });
+
+test('takeGifTrace asks for the recompiler mode when told to', async () => {
+  const emulator = tracer(completeDump);
+  let given;
+  emulator.gifTraceStart = async (_file, _probes, mode) => { given = mode; };
+  const png = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'watson-trace-')), 'shot.png');
+  await takeGifTrace(emulator, png, 1, [], [], 'recompiler');
+  assert.equal(given, 'recompiler');
+  await takeGifTrace(emulator, png, 1);
+  assert.equal(given, 'interpreter');
+});

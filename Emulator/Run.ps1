@@ -3,13 +3,18 @@ param([string]$Bios, [string]$Elf, [string]$State, [switch]$Interpreter, [switch
 
 $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent $PSScriptRoot
-$Exe = Join-Path $Root 'References\pcsx2\build\pcsx2-qt\Release\pcsx2-qt.exe'
+# WATSON_REFERENCES names another References tree (a worktree has none); WATSON_PCSX2_EXE another
+# emulator build; WATSON_INSTANCE_BASE moves every port, so a second checkout's emulators never
+# meet the first one's.
+$References = if ($env:WATSON_REFERENCES) { $env:WATSON_REFERENCES } else { Join-Path $Root 'References' }
+$Exe = if ($env:WATSON_PCSX2_EXE) { $env:WATSON_PCSX2_EXE } else { Join-Path $References 'pcsx2\build\pcsx2-qt\Release\pcsx2-qt.exe' }
+$Base = if ($env:WATSON_INSTANCE_BASE) { [int]$env:WATSON_INSTANCE_BASE } else { 0 }
 # Instance 0 is the emulator's own data directory; every other instance has a copy of its
 # settings and memory cards, and listens one port further on.
 $Shared = Join-Path $Root 'Runtime'
 $Runtime = if ($Instance -gt 0) { Join-Path $Shared "instance-$Instance" } else { $Shared }
 $Ini = Join-Path $Runtime 'PCSX2\inis\PCSX2.ini'
-$Port = 21512 + $Instance
+$Port = 21512 + $Base + $Instance
 
 function Fail([string]$Reason) { Write-Host "Run.ps1: $Reason"; exit 1 }
 
@@ -34,7 +39,7 @@ if ($Holder) {
     Fail "port $Port is already held by $($Process.Path) (pid $($Holder.OwningProcess)); close it first"
 }
 
-$Dependencies = Join-Path $Root 'References\pcsx2\deps\bin'
+$Dependencies = Join-Path $References 'pcsx2\deps\bin'
 if (-not (Test-Path (Join-Path $Dependencies 'Qt6Core.dll'))) { Fail "no Qt runtime in $Dependencies; run Emulator/Build.ps1" }
 $env:PATH = "$Dependencies;$env:PATH"
 
@@ -58,7 +63,7 @@ if (-not (Test-Path $Ini)) {
 }
 Set-IniValue $Ini 'UI' 'SetupWizardIncomplete' 'false'
 Set-IniValue $Ini 'EmuCore' 'EnablePINE' 'true'
-Set-IniValue $Ini 'EmuCore' 'PINESlot' "$(28011 + $Instance)"
+Set-IniValue $Ini 'EmuCore' 'PINESlot' "$(28011 + $Base + $Instance)"
 $env:WATSON_DEBUG_PORT = "$Port"
 # A program booted from an ELF may read files beside it through host: (HDD OSD reads its resources that way).
 Set-IniValue $Ini 'EmuCore' 'HostFs' 'true'
@@ -68,6 +73,9 @@ Set-IniValue $Ini 'EmuCore/GS' 'ScreenshotSize' '2'
 # The GIF trace needs the interpreters; every other launch puts the recompilers back.
 $Recompile = if ($Interpreter) { 'false' } else { 'true' }
 foreach ($Key in 'EnableEE', 'EnableVU0', 'EnableVU1') { Set-IniValue $Ini 'EmuCore/CPU/Recompiler' $Key $Recompile }
+# The interpreters divide with the FPU's own rounding (toward zero); the recompiler divides with
+# FPUDiv's, nearest by default. Toward zero everywhere keeps both giving the same results.
+Set-IniValue $Ini 'EmuCore/CPU' 'FPUDiv.Roundmode' '3'
 
 $Arguments = @('-datapath', "`"$Runtime`"")
 if ($Bios) {

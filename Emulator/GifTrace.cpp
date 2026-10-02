@@ -9,6 +9,8 @@
 #include "Config.h"
 #include "Counters.h"
 #include "Gif_Unit.h"
+#include "R5900.h"
+#include "R5900OpcodeTables.h"
 #include "VUmicro.h"
 #include "common/FileSystem.h"
 
@@ -23,6 +25,7 @@ namespace GifTrace
 {
 	bool g_active = false;
 	bool g_probing = false;
+	bool g_recProbing = false;
 
 	// A range of memory to record at a probe: `length` bytes at base + offset, where base is a
 	// register (or zero for an absolute address), or at the pointer stored there.
@@ -33,12 +36,25 @@ namespace GifTrace
 		u32 offset;
 		u32 length;
 	};
+	// One probe as asked for; several may share a program counter, each with its own ranges.
+	struct ProbeSpec
+	{
+		u32 index;
+		std::vector<ProbeRange> ranges;
+	};
 	struct ProbePoint
 	{
 		u32 pc;
-		std::vector<ProbeRange> ranges;
+		std::vector<ProbeSpec> specs;
 	};
 	static std::vector<ProbePoint> s_probes;
+	static std::string s_probeText;
+	// True while recording under the EE recompiler: probes fire from its breakpoint checks, and
+	// the registers at a DMA start are not current, so origins carry no context.
+	static bool s_recompiled = false;
+	// Whether an origin carries the instruction and the call stack that started the DMA. The stack
+	// walk is most of a traced frame's cost.
+	static bool s_context = true;
 
 	static std::FILE* s_file = nullptr;
 	static std::thread::id s_thread;
@@ -55,6 +71,7 @@ namespace GifTrace
 			s_error = why;
 		g_active = false;
 		g_probing = false;
+		g_recProbing = false;
 	}
 
 	static bool onCpuThread()
@@ -192,9 +209,9 @@ namespace GifTrace
 		return parts;
 	}
 
-	static constexpr size_t MAX_POINTS = 32;
-	static constexpr size_t MAX_RANGES = 8;
-	static constexpr u32 MAX_LENGTH = 0x4000;
+	static constexpr size_t MAX_PROBES = 1024;
+	static constexpr size_t MAX_RANGES = 64;
+	static constexpr u32 MAX_LENGTH = 0x10000;
 
 	// Returns an empty string and fills `out`, or the reason the text is refused.
 	static std::string parseProbes(const std::string& text, std::vector<ProbePoint>* out)
@@ -202,12 +219,14 @@ namespace GifTrace
 		out->clear();
 		if (text.empty())
 			return {};
+		u32 index = 0;
 		for (const std::string& part : split(text, ';'))
 		{
 			const auto bad = [&part](const char* why) { return "bad probe \"" + part + "\": " + why; };
 			const size_t equals = part.find('=');
-			ProbePoint point;
-			if (!parseHex(part.substr(0, equals), &point.pc))
+			u32 pc = 0;
+			ProbeSpec spec{index++, {}};
+			if (!parseHex(part.substr(0, equals), &pc))
 				return bad("the program counter is not a hex number");
 			if (equals != std::string::npos)
 			{
@@ -224,7 +243,7 @@ namespace GifTrace
 					if (colon == std::string::npos)
 						return bad("a range needs \":length\"");
 					if (!parseHex(rest.substr(colon + 1), &range.length) || range.length == 0 || range.length > MAX_LENGTH)
-						return bad("a length must be hex, between 1 and 0x4000");
+						return bad("a length must be hex, between 1 and 0x10000");
 					std::string base = rest.substr(0, colon);
 					const size_t plus = base.find('+');
 					if (plus != std::string::npos)
@@ -251,19 +270,18 @@ namespace GifTrace
 						range.reg = 0;
 						range.offset = absolute;
 					}
-					if (point.ranges.size() == MAX_RANGES)
-						return bad("more than 8 ranges");
-					point.ranges.push_back(range);
+					if (spec.ranges.size() == MAX_RANGES)
+						return bad("more than 64 ranges");
+					spec.ranges.push_back(range);
 				}
 			}
-			for (const ProbePoint& other : *out)
-			{
-				if (other.pc == point.pc)
-					return bad("this program counter is given twice");
-			}
-			if (out->size() == MAX_POINTS)
-				return bad("more than 32 probes");
-			out->push_back(std::move(point));
+			if (spec.index == MAX_PROBES)
+				return bad("more than 1024 probes");
+			const auto same = std::find_if(out->begin(), out->end(), [pc](const ProbePoint& point) { return point.pc == pc; });
+			if (same != out->end())
+				same->specs.push_back(std::move(spec));
+			else
+				out->push_back(ProbePoint{pc, {std::move(spec)}});
 		}
 		std::sort(out->begin(), out->end(), [](const ProbePoint& a, const ProbePoint& b) { return a.pc < b.pc; });
 		return {};
@@ -295,15 +313,9 @@ namespace GifTrace
 		}
 	}
 
-	void Exec(u32 pc)
+	static void record(u32 pc, const ProbeSpec& spec)
 	{
-		const auto found = std::lower_bound(s_probes.begin(), s_probes.end(), pc,
-			[](const ProbePoint& point, u32 value) { return point.pc < value; });
-		if (found == s_probes.end() || found->pc != pc)
-			return;
-		if (!onCpuThread())
-			return;
-		appendf("{\"type\":\"probe\",\"pc\":\"0x%08x\",\"frame\":%u,\"gpr\":\"", pc, g_FrameCount);
+		appendf("{\"type\":\"probe\",\"pc\":\"0x%08x\",\"probe\":%u,\"frame\":%u,\"gpr\":\"", pc, spec.index, g_FrameCount);
 		for (int index = 0; index < 32; index++)
 			appendf("%08x", cpuRegs.GPR.r[index].UL[0]);
 		s_line += "\",\"fpr\":\"";
@@ -311,7 +323,7 @@ namespace GifTrace
 			appendf("%08x", fpuRegs.fpr[index].UL);
 		s_line += "\",\"mem\":[";
 		bool first = true;
-		for (const ProbeRange& range : found->ranges)
+		for (const ProbeRange& range : spec.ranges)
 		{
 			u32 address = cpuRegs.GPR.r[range.reg].UL[0] + range.offset;
 			bool readable = true;
@@ -341,13 +353,45 @@ namespace GifTrace
 		flushLine();
 	}
 
-	std::string Start(const std::string& path, const std::string& probes)
+	static const ProbePoint* find(u32 pc)
+	{
+		const auto found = std::lower_bound(s_probes.begin(), s_probes.end(), pc,
+			[](const ProbePoint& point, u32 value) { return point.pc < value; });
+		return found == s_probes.end() || found->pc != pc ? nullptr : &*found;
+	}
+
+	void Exec(u32 pc)
+	{
+		const ProbePoint* point = find(pc);
+		if (!point || !onCpuThread())
+			return;
+		for (const ProbeSpec& spec : point->specs)
+			record(pc, spec);
+	}
+
+	bool IsRecProbe(u32 pc)
+	{
+		return g_recProbing && find(pc) != nullptr;
+	}
+
+	// A breakpoint check the recompiler compiled at pc: for a probe there, or for one in the
+	// delay slot of the branch at pc. Registers are flushed before the check runs.
+	void RecCheck(u32 pc)
+	{
+		Exec(pc);
+		if (find(pc + 4) && (R5900::GetInstruction(memRead32(pc)).flags & IS_BRANCH))
+			Exec(pc + 4);
+	}
+
+	std::string Start(const std::string& path, const std::string& probes, bool recompiled, bool context)
 	{
 		if (s_file)
 			return "a trace is already being recorded";
-		if (CHECK_EEREC)
+		if (recompiled && !CHECK_EEREC)
+			return "a state capture runs under the EE recompiler; launch without the interpreter option";
+		if (!recompiled && CHECK_EEREC)
 			return "the EE recompiler is on, and under it the EE registers are not current when data is sent; launch with the interpreter option";
-		if (REC_VU1)
+		if (!recompiled && REC_VU1)
 			return "the VU1 recompiler is on, and under it the VU1 program counter is not current; launch with the interpreter option";
 		std::vector<ProbePoint> points;
 		const std::string refused = parseProbes(probes, &points);
@@ -357,6 +401,9 @@ namespace GifTrace
 		if (!s_file)
 			return "cannot open " + path;
 		s_probes = std::move(points);
+		s_probeText = probes;
+		s_recompiled = recompiled;
+		s_context = context && !recompiled;
 
 		s_thread = std::this_thread::get_id();
 		s_error.clear();
@@ -365,7 +412,10 @@ namespace GifTrace
 		s_nextOrigin = 1;
 		s_origin[1] = s_origin[2] = 0;
 
-		appendf("{\"type\":\"header\",\"version\":1,\"frame\":%u}", g_FrameCount);
+		appendf("{\"type\":\"header\",\"version\":1,\"frame\":%u,\"recompiler\":%s,\"context\":%s,\"probes\":\"", g_FrameCount,
+			recompiled ? "true" : "false", s_context ? "true" : "false");
+		s_line += s_probeText;
+		s_line += "\"}";
 		flushLine();
 		// Bytes a path already holds were copied before anyone was watching.
 		for (u32 index = 0; index < 3; index++)
@@ -384,7 +434,13 @@ namespace GifTrace
 			return s_error;
 		}
 		g_active = true;
-		g_probing = !s_probes.empty();
+		g_probing = !recompiled && !s_probes.empty();
+		if (recompiled && !s_probes.empty())
+		{
+			// Blocks compiled before have no check at the probes: throw them away.
+			g_recProbing = true;
+			Cpu->Reset();
+		}
 		return {};
 	}
 
@@ -394,6 +450,11 @@ namespace GifTrace
 			return "no trace is being recorded";
 		g_active = false;
 		g_probing = false;
+		if (g_recProbing)
+		{
+			g_recProbing = false;
+			Cpu->Reset();
+		}
 		if (s_error.empty())
 		{
 			appendf("{\"type\":\"end\",\"packets\":%llu}", static_cast<unsigned long long>(s_packets));
@@ -417,7 +478,8 @@ namespace GifTrace
 		s_origin[channel] = id;
 		appendf("{\"type\":\"origin\",\"id\":%u,\"channel\":\"%s\",\"frame\":%u,\"chcr\":\"0x%08x\",\"madr\":\"0x%08x\",\"qwc\":%u,\"tadr\":\"0x%08x\"",
 			id, channel == 1 ? "vif1" : "gif", g_FrameCount, registers.chcr._u32, registers.madr, registers.qwc & 0xffffu, registers.tadr);
-		appendContext();
+		if (s_context)
+			appendContext();
 		s_line += '}';
 		flushLine();
 	}
@@ -439,7 +501,8 @@ namespace GifTrace
 				kind = "fifo";
 				origin = s_nextOrigin++;
 				appendf("{\"type\":\"origin\",\"id\":%u,\"channel\":\"fifo\",\"frame\":%u", origin, g_FrameCount);
-				appendContext();
+				if (s_context)
+					appendContext();
 				s_line += '}';
 				flushLine();
 				break;
@@ -454,7 +517,7 @@ namespace GifTrace
 			origin = 0;
 		appendf("{\"type\":\"data\",\"path\":%u,\"kind\":\"%s\",\"origin\":%u,\"space\":\"%s\",\"address\":%u,\"size\":%u",
 			(transferType & 3) + 1, kind, origin, space, address, size);
-		if (transferType == GIF_TRANS_XGKICK)
+		if (transferType == GIF_TRANS_XGKICK && !REC_VU1)
 			appendf(",\"vuTpc\":\"0x%04x\"", vuRegs[1].VI[REG_TPC].UL);
 		s_line += '}';
 		flushLine();

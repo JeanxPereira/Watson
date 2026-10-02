@@ -16,7 +16,7 @@ import * as fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { pressPad, takeSnapshot, takeGsDump, takeGifTrace } from './navigation.js';
 import { readTrace, compareTraceToDump, formatTrace } from './gs/trace.js';
-import { launchAndWait, reusingProbe, kill, systemHost, claimInstance, releaseClaim, debugPort, dataDirectory } from './lifecycle.js';
+import { launchAndWait, reusingProbe, kill, systemHost, claimInstance, releaseClaim, debugPort, pinePort, dataDirectory } from './lifecycle.js';
 import { parseGsDump, formatSummary, TraceRefused } from './gs/parse.js';
 import { walkGsDump } from './gsdump.js';
 import { findConfig, loadCatalog, resolveLaunch, registerState, describeStates, Catalog } from './catalog.js';
@@ -115,7 +115,7 @@ const server = new McpServer({ name: 'watson', version: '0.1.0' }, { capabilitie
 server.tool('watson_connect',
   'Connect to PCSX2. Tries DebugServer (21512), then Pine (28011). DebugServer gives FULL access (128-bit regs, expressions, conditional BP, native disasm). Pine gives memory + game info.',
   { debug_port: z.number().optional().describe('DebugServer port; default 21512, or the port of the instance this server launched'), pine_port: z.number().optional().describe('Pine IPC port; default 28011, likewise'), mode: z.enum(['auto', 'debug', 'pine']).default('auto') },
-  async ({ debug_port = debugPort(instance), pine_port = 28011 + instance, mode }) => {
+  async ({ debug_port = debugPort(instance), pine_port = pinePort(instance), mode }) => {
     const results: string[] = [];
     // Try DebugServer
     if (mode === 'auto' || mode === 'debug') {
@@ -717,8 +717,8 @@ server.tool('watson_gif_trace',
     path: z.string().optional().describe('Absolute .png path; the dump and the trace take the same name with .gs and .trace.jsonl'),
     probes: z.array(z.object({
       pc: z.string().describe('Program counter, hex. The probe fires before the instruction there executes.'),
-      ranges: z.array(z.string()).default([]).describe('Memory to record, each `[*]base[+hex]:hexlength`: base is a register name (a0, sp, ...) or a hex address; `*` follows the 32-bit pointer found there. Example: "a0:0x160", "*a1+0x60:0x40". Up to 8, 0x4000 bytes each.'),
-    })).max(32).default([]).describe('Record the EE registers and these memory ranges into the trace every time execution reaches a program counter: the real inputs of a function, in order with the packets it sends'),
+      ranges: z.array(z.string()).default([]).describe('Memory to record, each `[*]base[+hex]:hexlength`: base is a register name (a0, sp, ...) or a hex address; `*` follows the 32-bit pointer found there. Example: "a0:0x160", "*a1+0x60:0x40". Up to 64, 0x10000 bytes each.'),
+    })).max(1024).default([]).describe('Record the EE registers and these memory ranges into the trace every time execution reaches a program counter: the real inputs of a function, in order with the packets it sends'),
     hold: z.array(z.string()).default([]).describe('Pad buttons held on port 1 through the traced frames, pressed after the trace is armed and released before it stops: records what a press sets off from its first frame'),
   },
   async ({ frames, path: given, probes, hold }) => {
@@ -733,6 +733,64 @@ server.tool('watson_gif_trace',
       const parity = compareTraceToDump(trace, fs.readFileSync(files.dump));
       const failed = Boolean(parity.mismatch) || trace.desyncs.length > 0;
       return { content: [{ type: 'text' as const, text: formatTrace(trace, parity, files, probes) }], ...(failed ? { isError: true } : {}) };
+    } catch (e: any) { return failure(e); }
+  }
+);
+
+server.tool('watson_frame_capture',
+  'Record, for N frames, every packet sent to the GS and the EE registers and memory ranges at each probe, into the same trace format as watson_gif_trace, with a GS dump of the same frames, but without the instruction and call stack behind each packet: that stack walk is most of the cost of a traced frame. cpu "interpreter" (default; needs watson_launch with interpreter: true, or watson_set_cpu_mode) gives the interpreters\' arithmetic, the one every verifier was checked against, at a fraction of the cost of watson_gif_trace. cpu "recompiler" (launch without the interpreter option) runs at full speed, probes firing from breakpoint checks the recompiler compiles at their addresses; its float results differ from the interpreters\' in the last bits (the library\'s sine and cosine, FPU sums), so use it for structure, not for bit-for-bit checks. Several probes may share a program counter; each record carries the index of its probe. Leaves the VM paused.',
+  {
+    frames: z.number().int().min(1).max(3600).default(1),
+    path: z.string().optional().describe('Absolute .png path; the dump and the trace take the same name with .gs and .trace.jsonl'),
+    cpu: z.enum(['interpreter', 'recompiler']).default('interpreter'),
+    probes: z.array(z.object({
+      pc: z.string().describe('Program counter, hex. The probe fires before the instruction there executes.'),
+      ranges: z.array(z.string()).default([]).describe('Memory to record, as for watson_gif_trace. Up to 64, 0x10000 bytes each.'),
+    })).max(1024).default([]),
+    hold: z.array(z.string()).default([]).describe('Pad buttons held on port 1 through the captured frames'),
+  },
+  async ({ frames, path: given, cpu, probes, hold }) => {
+    try {
+      const client = requireDebug();
+      const frame = (await client.getStatus()).frame;
+      const started = Date.now();
+      const files = await takeGifTrace(client, capturePath(given, `capture-${frame}`), frames, probes, hold, cpu === 'recompiler' ? 'recompiler' : 'plain');
+      const seconds = (Date.now() - started) / 1000;
+      const trace = readTrace(files.trace);
+      if (!trace.complete) {
+        return { content: [{ type: 'text' as const, text: `trace: ${files.trace}\nverdict: NOT VERIFIED ${trace.reason}  coverage 0/?` }], isError: true };
+      }
+      const parity = compareTraceToDump(trace, fs.readFileSync(files.dump));
+      const failed = Boolean(parity.mismatch) || trace.desyncs.length > 0;
+      return { content: [{ type: 'text' as const, text: `${formatTrace(trace, parity, files, probes)}\ntime: ${seconds.toFixed(1)} s for ${frames} frames` }], ...(failed ? { isError: true } : {}) };
+    } catch (e: any) { return failure(e); }
+  }
+);
+
+server.tool('watson_set_cpu_mode',
+  'Switch the EE and VUs between the interpreters and the recompilers while the VM runs or is paused; the machine state is kept and the switch happens at the next execution slice. Navigate or boot under the recompilers (fast), then switch to the interpreters for watson_gif_trace or watson_frame_capture. Refused while a trace is recording.',
+  { mode: z.enum(['interpreter', 'recompiler']) },
+  async ({ mode }) => {
+    try {
+      const interpreter = await requireDebug().setCpuMode(mode);
+      return text(`cpu mode: ${interpreter ? 'interpreters' : 'recompilers'}`);
+    } catch (e: any) { return failure(e); }
+  }
+);
+
+server.tool('watson_gs_read',
+  'Write GS local memory (4 MB, or a part) to a file, after the GS thread has drawn everything sent so far. Pause the VM where you want to look (e.g. a breakpoint after an emitter sends its packet, under the recompilers) and read the buffers between sends. The software renderer (the default of the launch of Watson) keeps this memory current; a hardware renderer does not. The file is raw GS memory, swizzled as the GS stores it.',
+  {
+    path: z.string().describe('Absolute path of the file to write'),
+    offset: z.number().int().min(0).default(0).describe('Byte offset; a block (as TBP/FBP count them in 256-byte units) is offset / 256'),
+    length: z.number().int().min(1).max(4 * 1024 * 1024).default(4 * 1024 * 1024),
+  },
+  async ({ path: file, offset, length }) => {
+    try {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      const done = await requireDebug().gsRead(file, offset, length);
+      const renderer = done.renderer === 13 ? 'software' : `renderer ${done.renderer} (not the software one: the memory may be stale)`;
+      return text(`wrote ${done.bytes} bytes of GS memory from offset 0x${offset.toString(16)} to ${file}; ${renderer}`);
     } catch (e: any) { return failure(e); }
   }
 );

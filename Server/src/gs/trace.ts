@@ -27,6 +27,8 @@ export interface Probe {
   /** Whether it came before the first vsync, and how many packets of that part came before it. */
   preroll: boolean;
   at: number;
+  /** Position of the probe in the list asked for: several probes may share a program counter. */
+  index?: number;
 }
 export interface Trace {
   complete: boolean;
@@ -41,6 +43,10 @@ export interface Trace {
   /** Packets where the byte queue disagreed with the emulator: index into `packets`, or -1 - index into `preroll`. */
   desyncs: number[];
   probes: Probe[];
+  /** True for a state capture under the recompilers: packets and probes, origins without context. */
+  recompiler: boolean;
+  /** The probes as asked for, in the wire grammar; index i is the probe whose records carry index i. */
+  probeSpec: string;
 }
 export interface Parity { transfers: number; matched: number; vsyncs: number; mismatch?: string }
 
@@ -54,7 +60,7 @@ function advance(source: Source, by: number): Source {
 }
 
 export function readTrace(file: string): Trace {
-  const trace: Trace = { complete: false, frame: 0, origins: new Map(), preroll: [], packets: [], vsyncAt: [], desyncs: [], probes: [] };
+  const trace: Trace = { complete: false, frame: 0, origins: new Map(), preroll: [], packets: [], vsyncAt: [], desyncs: [], probes: [], recompiler: false, probeSpec: '' };
   const stop = (reason: string): Trace => ({ ...trace, complete: false, reason });
 
   let data: Buffer;
@@ -88,6 +94,8 @@ export function readTrace(file: string): Trace {
     if (record.type === 'header') {
       if (record.version !== 1) return stop(`trace version ${record.version} is not supported`);
       trace.frame = record.frame;
+      trace.recompiler = record.recompiler === true;
+      trace.probeSpec = typeof record.probes === 'string' ? record.probes : '';
     } else if (record.type === 'origin') {
       const { type, ...origin } = record;
       trace.origins.set(origin.id, origin as Origin);
@@ -142,6 +150,7 @@ export function readTrace(file: string): Trace {
         pc: parseInt(record.pc, 16), frame: record.frame, gpr, fpr,
         mem: (record.mem ?? []).map((range: any) => ({ address: range.address, bytes: typeof range.hex === 'string' ? Buffer.from(range.hex, 'hex') : null })),
         preroll: !started, at: (started ? trace.packets : trace.preroll).length,
+        ...(typeof record.probe === 'number' ? { index: record.probe } : {}),
       });
     } else if (record.type === 'vsync') {
       if (started) trace.vsyncAt.push(trace.packets.length);

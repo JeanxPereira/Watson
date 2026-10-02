@@ -61,6 +61,25 @@ EDITS = {
          '\tconst u32 pc = cpuRegs.pc;\n\tGifTrace::OnExec(pc);\n'
          '\t// We need to increase the pc before executing the memRead32.'),
     ],
+    # Probes under the EE recompiler: a probe address is compiled as a breakpoint check, and the
+    # check records the probe and goes on unless a real breakpoint is there too.
+    "pcsx2/R5900.cpp": [
+        ('#include "DebugTools/Breakpoints.h"\n',
+         '#include "DebugTools/Breakpoints.h"\n#include "DebugTools/GifTrace.h"\n'),
+        ('\tif (CBreakPoints::IsAddressBreakPoint(BREAKPOINT_EE, addr))\n\t\tbpFlags += 1;\n',
+         '\tif (CBreakPoints::IsAddressBreakPoint(BREAKPOINT_EE, addr) || GifTrace::IsRecProbe(addr))\n\t\tbpFlags += 1;\n'),
+        ('\tif (isBranchOrJump(addr) && CBreakPoints::IsAddressBreakPoint(BREAKPOINT_EE, addr+4))\n',
+         '\tif (isBranchOrJump(addr) && (CBreakPoints::IsAddressBreakPoint(BREAKPOINT_EE, addr+4) || GifTrace::IsRecProbe(addr+4)))\n'),
+    ],
+    "pcsx2/x86/ix86-32/iR5900.cpp": [
+        ('#include "DebugTools/Breakpoints.h"\n',
+         '#include "DebugTools/Breakpoints.h"\n#include "DebugTools/GifTrace.h"\n'),
+        ('void dynarecCheckBreakpoint()\n{\n\tu32 pc = cpuRegs.pc;\n',
+         'void dynarecCheckBreakpoint()\n{\n\tu32 pc = cpuRegs.pc;\n'
+         '\tif (GifTrace::g_recProbing)\n\t{\n\t\tGifTrace::RecCheck(pc);\n'
+         '\t\tif (!CBreakPoints::IsAddressBreakPoint(BREAKPOINT_EE, pc) && !CBreakPoints::IsAddressBreakPoint(BREAKPOINT_EE, pc + 4))\n'
+         '\t\t\treturn;\n\t}\n'),
+    ],
     "pcsx2/Gif.cpp": [
         ('void dmaGIF()\n{\n', 'void dmaGIF()\n{\n\tGifTrace::OnOrigin(2);\n'),
     ],

@@ -274,3 +274,16 @@ test('claimInstance takes the first instance nobody holds, instance 0 last', asy
   releaseClaim(dir, 2, 900);
   assert.equal(fs.existsSync(path.join(dir, 'Runtime', 'watson-2.pid')), false);
 });
+
+test('WATSON_INSTANCE_BASE moves the debug and Pine ports', async () => {
+  const { pinePort } = await import('../dist/lifecycle.js');
+  process.env.WATSON_INSTANCE_BASE = '10';
+  try {
+    assert.equal(debugPort(0), 21522);
+    assert.equal(debugPort(2), 21524);
+    assert.equal(pinePort(1), 28022);
+  } finally {
+    delete process.env.WATSON_INSTANCE_BASE;
+  }
+  assert.equal(debugPort(0), 21512);
+});

@@ -70,6 +70,7 @@ export interface ThreadInfo {
  * hex address; `*` reads the 32-bit pointer found there and records what it points to.
  */
 export interface ProbeSpec { pc: string; ranges?: string[] }
+export type TraceMode = 'interpreter' | 'plain' | 'recompiler';
 
 /** Probes in the form the DebugServer takes: `pc=range,range;pc`. */
 export function probeString(probes: ProbeSpec[]): string {
@@ -198,7 +199,9 @@ export class DebugServerClient {
         this.pendingReject = null;
         reject(new Error(`Command timeout: ${cmd.cmd}`));
         this.socket?.destroy();
-      }, cmd.cmd === 'frame_advance' ? 10000 + cmd.frames * 20000 : 10000);
+      }, cmd.cmd === 'frame_advance' ? 10000 + cmd.frames * 20000
+        // The emulator waits up to 60 s for the CPU thread to take these.
+        : ['pause', 'resume', 'gs_read', 'set_cpu_mode'].includes(cmd.cmd) ? 70000 : 10000);
       const settleResolve = (data: any) => { clearTimeout(timer); resolve(data); };
       const settleReject = (err: Error) => { clearTimeout(timer); reject(err); };
 
@@ -247,10 +250,15 @@ export class DebugServerClient {
     if (!resp.ok) throw new Error(resp.error);
   }
 
-  /** Start recording GIF packets and their origins to `path`. Needs the interpreters. */
-  async gifTraceStart(path: string, probes: ProbeSpec[] = []): Promise<void> {
+  /**
+   * Start recording GIF packets to `path`. 'interpreter' (needs the interpreters) also records the
+   * instruction and call stack behind each packet; 'plain' (interpreters) leaves that out, which is
+   * most of a traced frame's cost; 'recompiler' (recompilers) records packets and probes at full
+   * speed, with arithmetic that is not the interpreters' to the last bit.
+   */
+  async gifTraceStart(path: string, probes: ProbeSpec[] = [], mode: TraceMode = 'interpreter'): Promise<void> {
     const wire = probeString(probes);
-    const resp = await this.send({ cmd: 'gif_trace_start', path: DebugServerClient.wirePath(path), ...(wire ? { probes: wire } : {}) });
+    const resp = await this.send({ cmd: 'gif_trace_start', path: DebugServerClient.wirePath(path), ...(wire ? { probes: wire } : {}), ...(mode !== 'interpreter' ? { mode } : {}) });
     if (!resp.ok) throw new Error(resp.error);
   }
 
@@ -413,6 +421,20 @@ export class DebugServerClient {
     const resp = await this.send({ cmd: 'pause', cpu });
     if (!resp.ok) throw new Error(resp.error);
     return resp.pc;
+  }
+
+  /** Switch the EE and VU between interpreters and recompilers while the VM runs; the state is kept. */
+  async setCpuMode(mode: 'interpreter' | 'recompiler'): Promise<boolean> {
+    const resp = await this.send({ cmd: 'set_cpu_mode', mode });
+    if (!resp.ok) throw new Error(resp.error);
+    return resp.interpreter;
+  }
+
+  /** Write `length` bytes of GS local memory from byte `offset` to `path`, after the GS thread drains. */
+  async gsRead(path: string, offset = 0, length = 4 * 1024 * 1024): Promise<{ renderer: number; bytes: number }> {
+    const resp = await this.send({ cmd: 'gs_read', path: DebugServerClient.wirePath(path), offset, length });
+    if (!resp.ok) throw new Error(resp.error);
+    return { renderer: resp.renderer, bytes: resp.bytes };
   }
 
   async resume(cpu: CpuTarget = 'ee'): Promise<void> {

@@ -223,3 +223,21 @@ test('a probed program counter that never ran is listed with zero', () => {
   const text = formatTrace(trace, compareTraceToDump(trace, dumpOf([A, 'vsync'])), { trace: 't', dump: 'd' }, [{ pc: '0x232da0' }, { pc: '0x00200000' }]);
   assert.match(text, /probes: 1 records\n\s+1  0x00232da0\n\s+0  0x00200000/);
 });
+
+test('a state capture names its probes; records sharing a program counter carry their index', () => {
+  const head = { ...header, recompiler: true, probes: '0x00232da0=a0:0x4;0x00232da0=a1:0x4' };
+  const trace = readTrace(traceFile([head, vsync,
+    { ...probe('0x00232da0', [{ address: 0x10, hex: '01020304' }]), probe: 0 },
+    { ...probe('0x00232da0', [{ address: 0x20, hex: '05060708' }]), probe: 1 }]));
+  assert.equal(trace.complete, true);
+  assert.equal(trace.recompiler, true);
+  assert.equal(trace.probeSpec, '0x00232da0=a0:0x4;0x00232da0=a1:0x4');
+  assert.deepEqual(trace.probes.map((p) => [p.index, p.mem[0].address]), [[0, 0x10], [1, 0x20]]);
+});
+
+test('an older trace reads with no probe list and no indices', () => {
+  const trace = readTrace(traceFile([header, vsync, probe('0x00232da0')]));
+  assert.equal(trace.recompiler, false);
+  assert.equal(trace.probeSpec, '');
+  assert.equal(trace.probes[0].index, undefined);
+});

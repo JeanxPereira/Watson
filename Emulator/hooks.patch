@@ -142,6 +142,32 @@ index 59f5aa0..29a9c97 100644
  	if (COPY_GS_PACKET_TO_MTGS)
  	{
  		MTGS::PrepDataPacket(path, gsPack.size / 16);
+diff --git a/pcsx2/R5900.cpp b/pcsx2/R5900.cpp
+index 0835fc2..9f36f09 100644
+--- a/pcsx2/R5900.cpp
++++ b/pcsx2/R5900.cpp
+@@ -24,6 +24,7 @@
+ #include "GSDumpReplayer.h"
+ 
+ #include "DebugTools/Breakpoints.h"
++#include "DebugTools/GifTrace.h"
+ #include "DebugTools/MIPSAnalyst.h"
+ #include "DebugTools/SymbolGuardian.h"
+ #include "R5900OpcodeTables.h"
+@@ -792,11 +793,11 @@ inline bool isBranchOrJump(u32 addr)
+ int isBreakpointNeeded(u32 addr)
+ {
+ 	int bpFlags = 0;
+-	if (CBreakPoints::IsAddressBreakPoint(BREAKPOINT_EE, addr))
++	if (CBreakPoints::IsAddressBreakPoint(BREAKPOINT_EE, addr) || GifTrace::IsRecProbe(addr))
+ 		bpFlags += 1;
+ 
+ 	// there may be a breakpoint in the delay slot
+-	if (isBranchOrJump(addr) && CBreakPoints::IsAddressBreakPoint(BREAKPOINT_EE, addr+4))
++	if (isBranchOrJump(addr) && (CBreakPoints::IsAddressBreakPoint(BREAKPOINT_EE, addr+4) || GifTrace::IsRecProbe(addr+4)))
+ 		bpFlags += 2;
+ 
+ 	return bpFlags;
 diff --git a/pcsx2/Vif1_Dma.cpp b/pcsx2/Vif1_Dma.cpp
 index c85af24..7402a05 100644
 --- a/pcsx2/Vif1_Dma.cpp
@@ -154,3 +180,28 @@ index c85af24..7402a05 100644
  	VIF_LOG("dmaVIF1 chcr = %lx, madr = %lx, qwc  = %lx\n"
  			"        tadr = %lx, asr0 = %lx, asr1 = %lx",
  		vif1ch.chcr._u32, vif1ch.madr, vif1ch.qwc,
+diff --git a/pcsx2/x86/ix86-32/iR5900.cpp b/pcsx2/x86/ix86-32/iR5900.cpp
+index 026197c..071e171 100644
+--- a/pcsx2/x86/ix86-32/iR5900.cpp
++++ b/pcsx2/x86/ix86-32/iR5900.cpp
+@@ -4,6 +4,7 @@
+ #include "Common.h"
+ #include "CDVD/CDVD.h"
+ #include "DebugTools/Breakpoints.h"
++#include "DebugTools/GifTrace.h"
+ #include "Elfheader.h"
+ #include "GS.h"
+ #include "Host.h"
+@@ -1527,6 +1528,12 @@ bool COP2IsQOP(u32 code)
+ void dynarecCheckBreakpoint()
+ {
+ 	u32 pc = cpuRegs.pc;
++	if (GifTrace::g_recProbing)
++	{
++		GifTrace::RecCheck(pc);
++		if (!CBreakPoints::IsAddressBreakPoint(BREAKPOINT_EE, pc) && !CBreakPoints::IsAddressBreakPoint(BREAKPOINT_EE, pc + 4))
++			return;
++	}
+ 	if (CBreakPoints::CheckSkipFirst(BREAKPOINT_EE, pc) != 0)
+ 	{
+ 		CBreakPoints::ClearSkipFirst(BREAKPOINT_EE);

@@ -13,7 +13,10 @@ export interface LaunchOptions { bios?: string; elf?: string; state?: string; in
 
 const pidFile = (root: string, instance = 0) => path.join(root, 'Runtime', instance ? `watson-${instance}.pid` : 'watson.pid');
 /** Instance 0 listens on 21512; each further instance one port on. */
-export const debugPort = (instance: number) => 21512 + instance;
+/** WATSON_INSTANCE_BASE moves every port, so a second checkout's emulators never meet the first one's. */
+export const instanceBase = () => Number(process.env.WATSON_INSTANCE_BASE ?? 0) || 0;
+export const debugPort = (instance: number) => 21512 + instanceBase() + instance;
+export const pinePort = (instance: number) => 28011 + instanceBase() + instance;
 export const dataDirectory = (root: string, instance: number) => (instance ? path.join(root, 'Runtime', `instance-${instance}`) : path.join(root, 'Runtime'));
 
 /**
@@ -47,7 +50,8 @@ export function releaseClaim(root: string, instance: number, self: number = proc
   const file = pidFile(root, instance);
   if (fs.existsSync(file) && Number(fs.readFileSync(file, 'utf8').trim()) === self) fs.rmSync(file, { force: true });
 }
-const emulatorPath = (root: string) => path.join(root, 'References', 'pcsx2', 'build', 'pcsx2-qt', 'Release', 'pcsx2-qt.exe');
+const emulatorPath = (root: string) => process.env.WATSON_PCSX2_EXE
+  ?? path.join(process.env.WATSON_REFERENCES ?? path.join(root, 'References'), 'pcsx2', 'build', 'pcsx2-qt', 'Release', 'pcsx2-qt.exe');
 const same = (a: string, b: string) => path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase();
 
 export async function launch(host: Host, root: string, options: LaunchOptions): Promise<number> {

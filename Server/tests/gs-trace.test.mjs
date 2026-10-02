@@ -180,3 +180,46 @@ test('the verdict counts only packets checked against the dump and says how many
   assert.match(text, /packets: 2 \(1 after the dump's last, not checked\)/);
   assert.match(text, /verdict: FOUND 1 packets  coverage 1\/1$/);
 });
+
+const hex8 = (values) => values.map((v) => (v >>> 0).toString(16).padStart(8, '0')).join('');
+const registers = Array.from({ length: 32 }, (_, i) => 0x1000 + i);
+const floats = Array.from({ length: 32 }, (_, i) => 0x3f800000 + i);
+const probe = (pc, mem = []) => ({ type: 'probe', pc, frame: 501, gpr: hex8(registers), fpr: hex8(floats), mem });
+
+test('probes come back with their registers, their memory, and their place among the packets', () => {
+  const trace = readTrace(traceFile([header, probe('0x00232da0'), data(3, 'dma', 0, 'host', 0, 16), packet(3, C), vsync,
+    data(3, 'dma', 0, 'host', 0, 32), packet(3, A),
+    probe('0x00232da0', [{ address: 0x409280, hex: 'deadbeef' }, { address: 0, error: 'not readable' }]),
+    data(3, 'dma', 0, 'host', 0, 48), packet(3, B)]));
+  assert.equal(trace.complete, true, trace.reason);
+  assert.equal(trace.probes.length, 2);
+  assert.deepEqual([trace.probes[0].preroll, trace.probes[0].at], [true, 0]);
+  const second = trace.probes[1];
+  assert.deepEqual([second.preroll, second.at, second.pc, second.frame], [false, 1, 0x232da0, 501]);
+  assert.equal(second.gpr.length, 32);
+  assert.equal(second.gpr[4], 0x1004);
+  assert.equal(second.fpr[12], 0x3f80000c);
+  assert.equal(second.mem[0].address, 0x409280);
+  assert.deepEqual([...second.mem[0].bytes], [0xde, 0xad, 0xbe, 0xef]);
+  assert.equal(second.mem[1].bytes, null);
+});
+
+test('a probe record with a register block of the wrong length makes the trace incomplete', () => {
+  const broken = { ...probe('0x00232da0'), gpr: 'abcd' };
+  const trace = readTrace(traceFile([header, vsync, broken]));
+  assert.equal(trace.complete, false);
+  assert.match(trace.reason, /line 3.*gpr/);
+});
+
+test('the summary counts the records of each probed program counter', () => {
+  const trace = readTrace(traceFile([header, vsync, probe('0x00232da0'), probe('0x00232da0'), probe('0x00232aa4'),
+    data(3, 'dma', 0, 'host', 0, 32), packet(3, A), vsync]));
+  const text = formatTrace(trace, compareTraceToDump(trace, dumpOf([A, 'vsync'])), { trace: 't', dump: 'd' });
+  assert.match(text, /probes: 3 records\n\s+2  0x00232da0\n\s+1  0x00232aa4/);
+});
+
+test('a probed program counter that never ran is listed with zero', () => {
+  const trace = readTrace(traceFile([header, vsync, probe('0x00232da0'), data(3, 'dma', 0, 'host', 0, 32), packet(3, A), vsync]));
+  const text = formatTrace(trace, compareTraceToDump(trace, dumpOf([A, 'vsync'])), { trace: 't', dump: 'd' }, [{ pc: '0x232da0' }, { pc: '0x00200000' }]);
+  assert.match(text, /probes: 1 records\n\s+1  0x00232da0\n\s+0  0x00200000/);
+});

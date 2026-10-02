@@ -697,19 +697,26 @@ server.tool('watson_gs_dump', 'Capture N frames to an uncompressed GS dump (.gs)
 
 server.tool('watson_gif_trace',
   'Record, for N frames, every packet the EE side sends to the GS with where it came from: GIF path, source address, the EE instruction and call stack that started the DMA, the VU1 program counter. Captures a GS dump and a PNG of the same frames and checks the trace against the dump byte for byte. Needs watson_launch with interpreter: true. Leaves the VM paused. Feed the trace to watson_gsdump_parse to tie each draw to its origin.',
-  { frames: z.number().int().min(1).max(600).default(1), path: z.string().optional().describe('Absolute .png path; the dump and the trace take the same name with .gs and .trace.jsonl') },
-  async ({ frames, path: given }) => {
+  {
+    frames: z.number().int().min(1).max(600).default(1),
+    path: z.string().optional().describe('Absolute .png path; the dump and the trace take the same name with .gs and .trace.jsonl'),
+    probes: z.array(z.object({
+      pc: z.string().describe('Program counter, hex. The probe fires before the instruction there executes.'),
+      ranges: z.array(z.string()).default([]).describe('Memory to record, each `[*]base[+hex]:hexlength`: base is a register name (a0, sp, ...) or a hex address; `*` follows the 32-bit pointer found there. Example: "a0:0x160", "*a1+0x60:0x40". Up to 8, 0x4000 bytes each.'),
+    })).max(32).default([]).describe('Record the EE registers and these memory ranges into the trace every time execution reaches a program counter: the real inputs of a function, in order with the packets it sends'),
+  },
+  async ({ frames, path: given, probes }) => {
     try {
       const client = requireDebug();
       const frame = (await client.getStatus()).frame;
-      const files = await takeGifTrace(client, capturePath(given, `trace-${frame}`), frames);
+      const files = await takeGifTrace(client, capturePath(given, `trace-${frame}`), frames, probes);
       const trace = readTrace(files.trace);
       if (!trace.complete) {
         return { content: [{ type: 'text' as const, text: `trace: ${files.trace}\nbuild: unknown\nverdict: NOT VERIFIED ${trace.reason}  coverage 0/?` }], isError: true };
       }
       const parity = compareTraceToDump(trace, fs.readFileSync(files.dump));
       const failed = Boolean(parity.mismatch) || trace.desyncs.length > 0;
-      return { content: [{ type: 'text' as const, text: formatTrace(trace, parity, files) }], ...(failed ? { isError: true } : {}) };
+      return { content: [{ type: 'text' as const, text: formatTrace(trace, parity, files, probes) }], ...(failed ? { isError: true } : {}) };
     } catch (e: any) { return failure(e); }
   }
 );

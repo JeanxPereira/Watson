@@ -179,3 +179,13 @@ test('takeGifTrace removes a trace left by an earlier capture before it starts',
   emulator.gifTraceStart = async () => { assert.equal(fs.existsSync(stale), false); };
   await takeGifTrace(emulator, png, 1);
 });
+
+test('takeGifTrace hands its probes to the trace', async () => {
+  const emulator = tracer(completeDump);
+  let given;
+  emulator.gifTraceStart = async (_file, probes) => { given = probes; };
+  const png = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'watson-trace-')), 'shot.png');
+  const probes = [{ pc: '0x232da0', ranges: ['a0:0x160'] }];
+  await takeGifTrace(emulator, png, 1, probes);
+  assert.deepEqual(given, probes);
+});

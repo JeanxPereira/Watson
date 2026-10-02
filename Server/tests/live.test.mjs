@@ -365,3 +365,53 @@ test('live: a client that drops while tracing a running VM does not leave the tr
     second.disconnect();
   }
 });
+
+test('live: probes at the two channel-start instructions fire once per origin', async (t) => {
+  if (!(await listening())) return t.skip(`nothing listening on 127.0.0.1:${PORT}; start Emulator/Run.ps1`);
+  if (!EXPECT_VM) return t.skip('needs a running VM');
+  const client = new DebugServerClient('127.0.0.1', PORT);
+  await client.connect();
+  try {
+    if (!(await client.getStatus()).interpreter) return t.skip('the recompilers are on; launch with -Interpreter to trace');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'watson-probe-'));
+    const plain = readTrace((await takeGifTrace(client, path.join(dir, 'plain.png'), 1)).trace);
+    const starts = new Map();
+    for (const origin of plain.origins.values()) starts.set(origin.channel, origin.pc);
+    assert.ok(starts.has('vif1') || starts.has('gif'), 'the screen starts no DMA channel; use a state that draws');
+
+    const probes = [...starts.values()].map((pc) => ({ pc, ranges: ['sp:0x20', '*0x0:0x10'] }));
+    const probed = readTrace((await takeGifTrace(client, path.join(dir, 'probed.png'), 1, probes)).trace);
+    assert.equal(probed.complete, true, probed.reason);
+    for (const [channel, pc] of starts) {
+      const origins = [...probed.origins.values()].filter((origin) => origin.channel === channel).length;
+      const hits = probed.probes.filter((hit) => hit.pc === parseInt(pc, 16)).length;
+      assert.equal(hits, origins, `${channel}: ${hits} probe records, ${origins} origins`);
+    }
+    const hit = probed.probes[0];
+    assert.equal(hit.mem[0].bytes.length, 0x20);
+    assert.equal(hit.mem[0].address, hit.gpr[29]);
+    // The pointer at address 0 is whatever the kernel keeps there; it must be read or refused, never crash.
+    assert.ok(hit.mem[1].bytes === null || hit.mem[1].bytes.length === 0x10);
+  } finally {
+    client.disconnect();
+  }
+});
+
+test('live: a malformed probe is refused whole and leaves no trace running', async (t) => {
+  if (!(await listening())) return t.skip(`nothing listening on 127.0.0.1:${PORT}; start Emulator/Run.ps1`);
+  if (!EXPECT_VM) return t.skip('needs a running VM');
+  const client = new DebugServerClient('127.0.0.1', PORT);
+  await client.connect();
+  try {
+    if (!(await client.getStatus()).interpreter) return t.skip('the recompilers are on; launch with -Interpreter to trace');
+    await client.pause();
+    const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'watson-probe-')), 'bad.trace.jsonl');
+    await assert.rejects(client.gifTraceStart(file, [{ pc: '0x232da0', ranges: ['q9:0x10'] }]), /bad probe "0x232da0=q9:0x10".*register/);
+    await assert.rejects(client.gifTraceStart(file, [{ pc: '0x232da0', ranges: ['a0:0x8000'] }]), /bad probe.*length/);
+    assert.equal(fs.existsSync(file), false);
+    await client.gifTraceStart(file);
+    await client.gifTraceStop();
+  } finally {
+    client.disconnect();
+  }
+});

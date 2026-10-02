@@ -64,6 +64,25 @@ export interface ThreadInfo {
   wait_type: number;
 }
 
+/**
+ * A place to record the EE's registers, and memory, every time execution reaches it during a
+ * GIF trace. A range is `[*]base[+hex]:hexlength`: base is a register name (a0, sp, ...) or a
+ * hex address; `*` reads the 32-bit pointer found there and records what it points to.
+ */
+export interface ProbeSpec { pc: string; ranges?: string[] }
+
+/** Probes in the form the DebugServer takes: `pc=range,range;pc`. */
+export function probeString(probes: ProbeSpec[]): string {
+  return probes.map((probe) => {
+    if (!/^(0x)?[0-9a-fA-F]{1,8}$/.test(probe.pc)) throw new Error(`program counter "${probe.pc}" is not a hex number`);
+    const ranges = probe.ranges ?? [];
+    for (const range of ranges) {
+      if (/[;,=\s]/.test(range) || range.length === 0) throw new Error(`range "${range}" of probe ${probe.pc} holds a character the grammar reserves`);
+    }
+    return ranges.length > 0 ? `${probe.pc}=${ranges.join(',')}` : probe.pc;
+  }).join(';');
+}
+
 export interface StepResult {
   old_pc: string;
   new_pc: string;
@@ -229,8 +248,9 @@ export class DebugServerClient {
   }
 
   /** Start recording GIF packets and their origins to `path`. Needs the interpreters. */
-  async gifTraceStart(path: string): Promise<void> {
-    const resp = await this.send({ cmd: 'gif_trace_start', path: DebugServerClient.wirePath(path) });
+  async gifTraceStart(path: string, probes: ProbeSpec[] = []): Promise<void> {
+    const wire = probeString(probes);
+    const resp = await this.send({ cmd: 'gif_trace_start', path: DebugServerClient.wirePath(path), ...(wire ? { probes: wire } : {}) });
     if (!resp.ok) throw new Error(resp.error);
   }
 

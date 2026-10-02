@@ -1,5 +1,6 @@
 import * as fs from 'node:fs';
 import { walkGsDump } from './gsdump.js';
+import type { ProbeSpec } from './debug-server-client.js';
 
 export interface Emulator {
   frameAdvance(frames: number): Promise<number>;
@@ -95,7 +96,7 @@ export async function takeGsDump(emulator: Emulator, path: string, frames: numbe
 }
 
 export interface Tracer extends Emulator {
-  gifTraceStart(path: string): Promise<void>;
+  gifTraceStart(path: string, probes?: ProbeSpec[]): Promise<void>;
   gifTraceStop(): Promise<number>;
   pause(): Promise<unknown>;
 }
@@ -106,11 +107,11 @@ export interface Tracer extends Emulator {
  * between the two requests and the dump would begin one vsync late. The trace is stopped only
  * after the dump is closed, so it covers every packet the dump holds.
  */
-export async function takeGifTrace(emulator: Tracer, path: string, frames: number): Promise<{ png: string; dump: string; trace: string }> {
+export async function takeGifTrace(emulator: Tracer, path: string, frames: number, probes: ProbeSpec[] = []): Promise<{ png: string; dump: string; trace: string }> {
   const trace = path.replace(/\.png$/i, '.trace.jsonl');
   fs.rmSync(trace, { force: true });
   await emulator.pause();
-  await emulator.gifTraceStart(trace);
+  await emulator.gifTraceStart(trace, probes);
   let files: { png: string; dump: string };
   try {
     files = await takeGsDump(emulator, path, frames);

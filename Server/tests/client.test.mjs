@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import net from 'node:net';
-import { DebugServerClient } from '../dist/debug-server-client.js';
+import { DebugServerClient, probeString } from '../dist/debug-server-client.js';
 
 const STATUS = '{"ok":true,"data":{"alive":true,"paused":false,"pc":"00100000","cycles":5}}\n';
 
@@ -79,6 +79,36 @@ test('two concurrent requests each get their own reply', async () => {
     const [first, second] = await Promise.race([Promise.all([client.getStatus(), client.getStatus()]), unsettled]);
     assert.equal(first.cycles, 1);
     assert.equal(second.cycles, 2);
+  } finally {
+    client.disconnect();
+    server.close();
+  }
+});
+
+test('probeString writes points and ranges in the wire grammar', () => {
+  assert.equal(probeString([{ pc: '0x232da0', ranges: ['a0:0x160', '*a1+0x60:0x40'] }, { pc: '0x232aa4' }]),
+    '0x232da0=a0:0x160,*a1+0x60:0x40;0x232aa4');
+  assert.equal(probeString([]), '');
+});
+
+test('probeString refuses what would break the grammar, naming it', () => {
+  assert.throws(() => probeString([{ pc: 'main' }]), /program counter "main"/);
+  assert.throws(() => probeString([{ pc: '0x100', ranges: ['a0:0x10;0x200'] }]), /range "a0:0x10;0x200"/);
+  assert.throws(() => probeString([{ pc: '0x100', ranges: ['a0=1:0x10'] }]), /range "a0=1:0x10"/);
+});
+
+test('gifTraceStart sends probes only when there are some', async () => {
+  const seen = [];
+  const server = await fakeServer((req, socket) => { seen.push(req); socket.write('{"ok":true}\n'); });
+  const client = new DebugServerClient('127.0.0.1', server.address().port);
+  await client.connect();
+  try {
+    await client.gifTraceStart('D:\\a\\t.jsonl');
+    await client.gifTraceStart('D:\\a\\t.jsonl', [{ pc: '0x232da0', ranges: ['a0:0x160'] }]);
+    assert.deepEqual(seen, [
+      { cmd: 'gif_trace_start', path: 'D:/a/t.jsonl' },
+      { cmd: 'gif_trace_start', path: 'D:/a/t.jsonl', probes: '0x232da0=a0:0x160' },
+    ]);
   } finally {
     client.disconnect();
     server.close();

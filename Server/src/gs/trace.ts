@@ -14,6 +14,20 @@ export interface Origin {
 }
 export interface Source { kind: string; origin: number; space: string; address: number; size: number; vuTpc?: string }
 export interface TracePacket { path: number; bytes: Buffer; sources: Source[] }
+/** The EE's state when execution reached a probed program counter, before that instruction ran. */
+export interface Probe {
+  pc: number;
+  frame: number;
+  /** Low 32 bits of the 32 general registers, in register order. */
+  gpr: number[];
+  /** Raw bits of the 32 FPU registers. */
+  fpr: number[];
+  /** One entry per range asked for; `bytes` is null where the memory could not be read. */
+  mem: { address: number; bytes: Buffer | null }[];
+  /** Whether it came before the first vsync, and how many packets of that part came before it. */
+  preroll: boolean;
+  at: number;
+}
 export interface Trace {
   complete: boolean;
   reason?: string;
@@ -26,6 +40,7 @@ export interface Trace {
   vsyncAt: number[];
   /** Packets where the byte queue disagreed with the emulator: index into `packets`, or -1 - index into `preroll`. */
   desyncs: number[];
+  probes: Probe[];
 }
 export interface Parity { transfers: number; matched: number; vsyncs: number; mismatch?: string }
 
@@ -39,7 +54,7 @@ function advance(source: Source, by: number): Source {
 }
 
 export function readTrace(file: string): Trace {
-  const trace: Trace = { complete: false, frame: 0, origins: new Map(), preroll: [], packets: [], vsyncAt: [], desyncs: [] };
+  const trace: Trace = { complete: false, frame: 0, origins: new Map(), preroll: [], packets: [], vsyncAt: [], desyncs: [], probes: [] };
   const stop = (reason: string): Trace => ({ ...trace, complete: false, reason });
 
   let data: Buffer;
@@ -112,6 +127,22 @@ export function readTrace(file: string): Trace {
       }
       target.push({ path: record.path, bytes, sources });
       seen += 1;
+    } else if (record.type === 'probe') {
+      const words = (text: unknown): number[] | null => {
+        if (typeof text !== 'string' || text.length !== 256) return null;
+        const out: number[] = [];
+        for (let i = 0; i < 32; i++) out.push(parseInt(text.slice(8 * i, 8 * i + 8), 16));
+        return out.some(Number.isNaN) ? null : out;
+      };
+      const gpr = words(record.gpr);
+      const fpr = words(record.fpr);
+      if (!gpr) return stop(`line ${line}: a probe's gpr is not 32 registers of 8 hex digits`);
+      if (!fpr) return stop(`line ${line}: a probe's fpr is not 32 registers of 8 hex digits`);
+      trace.probes.push({
+        pc: parseInt(record.pc, 16), frame: record.frame, gpr, fpr,
+        mem: (record.mem ?? []).map((range: any) => ({ address: range.address, bytes: typeof range.hex === 'string' ? Buffer.from(range.hex, 'hex') : null })),
+        preroll: !started, at: (started ? trace.packets : trace.preroll).length,
+      });
     } else if (record.type === 'vsync') {
       if (started) trace.vsyncAt.push(trace.packets.length);
       started = true;
@@ -186,7 +217,7 @@ export function describeSource(trace: Trace, path: number, source: Source): stri
 /** Sources listed in a summary; a busy screen has a hundred. */
 const SHOWN = 12;
 
-export function formatTrace(trace: Trace, parity: Parity, files: { trace: string; dump: string; png?: string }): string {
+export function formatTrace(trace: Trace, parity: Parity, files: { trace: string; dump: string; png?: string }, probed: { pc: string }[] = []): string {
   const groups = new Map<string, { packets: number; bytes: number; stack: string }>();
   for (const packet of trace.packets) {
     for (const [index, source] of packet.sources.entries()) {
@@ -197,6 +228,13 @@ export function formatTrace(trace: Trace, parity: Parity, files: { trace: string
       groups.set(key, group);
     }
   }
+  const hits = new Map<number, number>();
+  for (const asked of probed) hits.set(parseInt(asked.pc, 16), 0);
+  for (const probe of trace.probes) hits.set(probe.pc, (hits.get(probe.pc) ?? 0) + 1);
+  const probeLines = hits.size === 0 ? [] : [
+    `probes: ${trace.probes.length} records`,
+    ...[...hits.entries()].sort((a, b) => b[1] - a[1]).map(([pc, count]) => `  ${String(count).padStart(5)}  0x${pc.toString(16).padStart(8, '0')}`),
+  ];
   const rows = [...groups.entries()].sort((a, b) => b[1].bytes - a[1].bytes);
   const shown = rows.slice(0, SHOWN);
   const hidden = rows.slice(SHOWN);
@@ -215,6 +253,7 @@ export function formatTrace(trace: Trace, parity: Parity, files: { trace: string
     ...(files.png ? [`png: ${files.png}`] : []),
     `frames: ${trace.vsyncAt.length}   packets: ${trace.packets.length}${!parity.mismatch && unchecked > 0 ? ` (${unchecked} after the dump's last, not checked)` : ''}   bytes: ${bytes}   before the first vsync: ${trace.preroll.length} packets`,
     `origins recorded: ${trace.origins.size}`,
+    ...probeLines,
     'sources, by bytes (packets they begin, bytes, function entries of the stack):',
     ...shown.map(([key, group]) => `  ${String(group.packets).padStart(5)}  ${String(group.bytes).padStart(8)}  ${key}${group.stack ? `\n${' '.repeat(19)}stack ${group.stack}` : ''}`),
     ...(hidden.length > 0 ? [`  and ${hidden.length} more sources, ${hidden.reduce((sum, [, group]) => sum + group.bytes, 0)} bytes; every one is in the trace file`] : []),

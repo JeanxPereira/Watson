@@ -115,3 +115,15 @@ test('describeStates lists every state with whether its file exists', () => {
     'hddosd-1.10U  (no states)',
   ]);
 });
+
+test('loadCatalog reads how many emulators may run side by side', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'watson-instances-'));
+  const file = path.join(dir, 'watson.json');
+  const write = (extra) => fs.writeFileSync(file, JSON.stringify({ schema: 1, builds: [{ id: 'a', launch: { bios: 'a.bin' } }], ...extra }));
+  write({});
+  assert.equal(loadCatalog(file).instances, 1);
+  write({ instances: 5 });
+  assert.equal(loadCatalog(file).instances, 5);
+  write({ instances: 0 });
+  assert.throws(() => loadCatalog(file), /instances must be a whole number from 1 to 8/);
+});

@@ -16,6 +16,8 @@ export interface Build {
 export interface Catalog {
   file: string;
   builds: Build[];
+  /** How many emulators may run side by side for this consumer; 1 unless it says otherwise. */
+  instances: number;
 }
 
 export interface LaunchRequest { build?: string; state?: string; bios?: string; elf?: string; }
@@ -55,6 +57,8 @@ export function loadCatalog(file: string): Catalog {
 
   if (raw.schema !== 1) refuse('schema must be 1');
   if (!Array.isArray(raw.builds) || raw.builds.length === 0) refuse('builds must list at least one build');
+  const instances = raw.instances ?? 1;
+  if (!Number.isInteger(instances) || instances < 1 || instances > 8) refuse('instances must be a whole number from 1 to 8');
 
   const base = path.dirname(file);
   const resolve = (relative: string) => path.resolve(base, relative);
@@ -84,7 +88,7 @@ export function loadCatalog(file: string): Catalog {
       states,
     });
   }
-  return { file, builds };
+  return { file, builds, instances };
 }
 
 const looksLikePath = (value: string) => /[\\/]/.test(value) || /\.p2s$/i.test(value);

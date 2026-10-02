@@ -16,7 +16,7 @@ import * as fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { pressPad, takeSnapshot, takeGsDump, takeGifTrace } from './navigation.js';
 import { readTrace, compareTraceToDump, formatTrace } from './gs/trace.js';
-import { launchAndWait, reusingProbe, kill, systemHost } from './lifecycle.js';
+import { launchAndWait, reusingProbe, kill, systemHost, claimInstance, releaseClaim, debugPort, dataDirectory } from './lifecycle.js';
 import { parseGsDump, formatSummary, TraceRefused } from './gs/parse.js';
 import { walkGsDump } from './gsdump.js';
 import { findConfig, loadCatalog, resolveLaunch, registerState, describeStates, Catalog } from './catalog.js';
@@ -24,6 +24,9 @@ import { findConfig, loadCatalog, resolveLaunch, registerState, describeStates, 
 // ===== State =====
 let debugServer: DebugServerClient | null = null;
 let pine: PineClient | null = null;
+// The emulator instance this server launched, and whether it is one of several that may run.
+let instance = 0;
+let ownsEmulator = false;
 const memSnapshots = new Map<string, { addr: number; data: Buffer }>();
 
 // ===== Helpers =====
@@ -64,7 +67,7 @@ function configFile(): string | null {
 
 function emulatorLogTail(): string {
   try {
-    const lines = fs.readFileSync(path.join(WATSON_ROOT, 'Runtime', 'PCSX2', 'logs', 'emulog.txt'), 'utf8').trimEnd().split(/\r?\n/);
+    const lines = fs.readFileSync(path.join(dataDirectory(WATSON_ROOT, instance), 'PCSX2', 'logs', 'emulog.txt'), 'utf8').trimEnd().split(/\r?\n/);
     return lines.slice(-15).join('\n');
   } catch {
     return '';
@@ -111,8 +114,8 @@ const server = new McpServer({ name: 'watson', version: '0.1.0' }, { capabilitie
 // ==========================================================
 server.tool('watson_connect',
   'Connect to PCSX2. Tries DebugServer (21512), then Pine (28011). DebugServer gives FULL access (128-bit regs, expressions, conditional BP, native disasm). Pine gives memory + game info.',
-  { debug_port: z.number().default(21512).describe('DebugServer port'), pine_port: z.number().default(28011).describe('Pine IPC port'), mode: z.enum(['auto', 'debug', 'pine']).default('auto') },
-  async ({ debug_port, pine_port, mode }) => {
+  { debug_port: z.number().optional().describe('DebugServer port; default 21512, or the port of the instance this server launched'), pine_port: z.number().optional().describe('Pine IPC port; default 28011, likewise'), mode: z.enum(['auto', 'debug', 'pine']).default('auto') },
+  async ({ debug_port = debugPort(instance), pine_port = 28011 + instance, mode }) => {
     const results: string[] = [];
     // Try DebugServer
     if (mode === 'auto' || mode === 'debug') {
@@ -595,22 +598,28 @@ server.tool('watson_launch',
     try {
       const { bios, elf, state } = resolveLaunch(catalog(), request);
       if (state && !fs.existsSync(state)) throw new Error(`state file not found: ${state}`);
+      const pool = catalog()?.instances ?? 1;
+      if (ownsEmulator) throw new Error(`this server already launched instance ${instance}; use watson_kill first`);
+      instance = await claimInstance(systemHost, WATSON_ROOT, pool);
+      const port = debugPort(instance);
       const { probe, current } = reusingProbe(async () => {
-        const client = new DebugServerClient('127.0.0.1', 21512);
+        const client = new DebugServerClient('127.0.0.1', port);
         try { await client.connect(); return client; } catch (error) { client.disconnect(); throw error; }
       });
       debugServer?.disconnect();
       debugServer = null;
       let started;
       try {
-        started = await launchAndWait(systemHost, WATSON_ROOT, { bios, elf, state, interpreter: request.interpreter, visible: request.visible, gameArgs: request.args }, probe,
+        started = await launchAndWait(systemHost, WATSON_ROOT, { bios, elf, state, interpreter: request.interpreter, visible: request.visible, gameArgs: request.args, instance }, probe,
           { timeoutMs: 60000, intervalMs: 500, logTail: emulatorLogTail });
       } catch (error) {
         current()?.disconnect();
+        releaseClaim(WATSON_ROOT, instance);
         throw error;
       }
       debugServer = current();
-      return text(`launched pid ${started.pid}; connected; alive=${started.alive} frame=${started.frame}`);
+      ownsEmulator = pool > 1;
+      return text(`launched pid ${started.pid}${pool > 1 ? ` as instance ${instance} (port ${port})` : ''}; connected; alive=${started.alive} frame=${started.frame}`);
     } catch (e: any) { return failure(e); }
   }
 );
@@ -620,7 +629,9 @@ server.tool('watson_kill', 'Terminate the PCSX2 that watson_launch started. Neve
     try {
       debugServer?.disconnect();
       debugServer = null;
-      return text(await kill(systemHost, WATSON_ROOT));
+      const result = await kill(systemHost, WATSON_ROOT, instance);
+      ownsEmulator = false;
+      return text(result);
     } catch (e: any) { return failure(e); }
   }
 );
@@ -787,6 +798,13 @@ server.resource('debug_protocol', 'ps2://debug_protocol', async () => ({
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
+  // With several instances a session that ends without watson_kill would keep one taken for good.
+  const leave = async () => {
+    if (ownsEmulator) { ownsEmulator = false; try { await kill(systemHost, WATSON_ROOT, instance); } catch { /* already gone */ } }
+    process.exit(0);
+  };
+  transport.onclose = leave;
+  process.stdin.on('end', leave);
   console.error('Watson MCP server running');
 }
 main().catch(e => { console.error('Fatal:', e); process.exit(1); });

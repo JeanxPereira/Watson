@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { launch, kill } from '../dist/lifecycle.js';
+import { launch, kill, claimInstance, releaseClaim, debugPort } from '../dist/lifecycle.js';
 
 function root() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'watson-root-'));
@@ -231,4 +231,46 @@ test('launch passes the program arguments through, and nothing when there are no
   await launch(host, dir, { elf: 'osd.elf' });
   assert.deepEqual(seen[0].slice(seen[0].indexOf('-GameArgs')), ['-GameArgs', 'SkipSearchLater BootClock']);
   assert.ok(!seen[1].includes('-GameArgs'));
+});
+
+test('an instance other than 0 has its own pid file and is named to Run.ps1', async () => {
+  const dir = root();
+  const seen = [];
+  const host = {
+    async run(file, args) { seen.push(args); return { code: 0, output: 'pcsx2 pid 77\n' }; },
+    async processPath() { return exeOf(dir); },
+    async isRunning() { return true; },
+    async terminate() {},
+  };
+  await launch(host, dir, { bios: 'b.bin', instance: 2 });
+  assert.deepEqual(seen[0].slice(-2), ['-Instance', '2']);
+  assert.equal(fs.readFileSync(path.join(dir, 'Runtime', 'watson-2.pid'), 'utf8').trim(), '77');
+  assert.equal(fs.existsSync(path.join(dir, 'Runtime', 'watson.pid')), false);
+  assert.match(await kill(host, dir, 2), /77/);
+  assert.equal(fs.existsSync(path.join(dir, 'Runtime', 'watson-2.pid')), false);
+  assert.equal(debugPort(0), 21512);
+  assert.equal(debugPort(2), 21514);
+});
+
+test('claimInstance takes the first instance nobody holds, instance 0 last', async () => {
+  const dir = root();
+  const running = new Set([500]);
+  const host = { async run() {}, async processPath() { return null; }, async isRunning(pid) { return running.has(pid); }, async terminate() {} };
+  assert.equal(await claimInstance(host, dir, 1, 900), 0);
+  assert.equal(fs.existsSync(path.join(dir, 'Runtime', 'watson.pid')), false);
+
+  fs.writeFileSync(path.join(dir, 'Runtime', 'watson-1.pid'), '500');      // a live emulator
+  fs.writeFileSync(path.join(dir, 'Runtime', 'watson-2.pid'), '501');      // a dead one
+  running.add(900);
+  assert.equal(await claimInstance(host, dir, 3, 900), 2);
+  assert.equal(fs.readFileSync(path.join(dir, 'Runtime', 'watson-2.pid'), 'utf8'), '900');
+  running.add(901);
+  assert.equal(await claimInstance(host, dir, 3, 901), 0);
+  running.add(902);
+  await assert.rejects(claimInstance(host, dir, 3, 902), /all 3 emulator instances are in use/);
+
+  releaseClaim(dir, 2, 901);
+  assert.equal(fs.existsSync(path.join(dir, 'Runtime', 'watson-2.pid')), true);
+  releaseClaim(dir, 2, 900);
+  assert.equal(fs.existsSync(path.join(dir, 'Runtime', 'watson-2.pid')), false);
 });

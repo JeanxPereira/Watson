@@ -59,6 +59,7 @@ typedef int socket_t;
 #include "common/Error.h"
 #include "common/FileSystem.h"
 
+#include <cstdlib>
 #include <cstring>
 #include <cstdio>
 #include <string>
@@ -1319,6 +1320,12 @@ namespace DebugServer
 	void Start(int port)
 	{
 		if (s_running.exchange(true)) return;
+		// Several emulators can run side by side, each told its own port by the launcher.
+		if (const char* given = std::getenv("WATSON_DEBUG_PORT"))
+		{
+			const int parsed = std::atoi(given);
+			if (parsed > 0 && parsed < 65536) port = parsed;
+		}
 		s_serverThread = std::thread(serverLoop, port);
 	}
 

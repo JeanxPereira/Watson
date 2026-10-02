@@ -1,12 +1,15 @@
 #requires -Version 7
-param([string]$Bios, [string]$Elf, [string]$State, [switch]$Interpreter, [switch]$Visible, [string]$GameArgs)
+param([string]$Bios, [string]$Elf, [string]$State, [switch]$Interpreter, [switch]$Visible, [string]$GameArgs, [int]$Instance = 0)
 
 $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent $PSScriptRoot
 $Exe = Join-Path $Root 'References\pcsx2\build\pcsx2-qt\Release\pcsx2-qt.exe'
-$Runtime = Join-Path $Root 'Runtime'
+# Instance 0 is the emulator's own data directory; every other instance has a copy of its
+# settings and memory cards, and listens one port further on.
+$Shared = Join-Path $Root 'Runtime'
+$Runtime = if ($Instance -gt 0) { Join-Path $Shared "instance-$Instance" } else { $Shared }
 $Ini = Join-Path $Runtime 'PCSX2\inis\PCSX2.ini'
-$Port = 21512
+$Port = 21512 + $Instance
 
 function Fail([string]$Reason) { Write-Host "Run.ps1: $Reason"; exit 1 }
 
@@ -35,6 +38,15 @@ $Dependencies = Join-Path $Root 'References\pcsx2\deps\bin'
 if (-not (Test-Path (Join-Path $Dependencies 'Qt6Core.dll'))) { Fail "no Qt runtime in $Dependencies; run Emulator/Build.ps1" }
 $env:PATH = "$Dependencies;$env:PATH"
 
+if ($Instance -gt 0 -and -not (Test-Path $Ini) -and (Test-Path (Join-Path $Shared 'PCSX2\inis\PCSX2.ini'))) {
+    foreach ($Name in 'inis', 'memcards') {
+        $From = Join-Path $Shared "PCSX2\$Name"
+        if (Test-Path $From) {
+            New-Item -ItemType Directory -Force (Join-Path $Runtime 'PCSX2') | Out-Null
+            Copy-Item $From (Join-Path $Runtime "PCSX2\$Name") -Recurse -Force
+        }
+    }
+}
 if (-not (Test-Path $Ini)) {
     New-Item -ItemType Directory -Force $Runtime | Out-Null
     $Init = Start-Process -FilePath $Exe -ArgumentList @('-datapath', "`"$Runtime`"", '-testconfig') -PassThru
@@ -46,6 +58,8 @@ if (-not (Test-Path $Ini)) {
 }
 Set-IniValue $Ini 'UI' 'SetupWizardIncomplete' 'false'
 Set-IniValue $Ini 'EmuCore' 'EnablePINE' 'true'
+Set-IniValue $Ini 'EmuCore' 'PINESlot' "$(28011 + $Instance)"
+$env:WATSON_DEBUG_PORT = "$Port"
 # A program booted from an ELF may read files beside it through host: (HDD OSD reads its resources that way).
 Set-IniValue $Ini 'EmuCore' 'HostFs' 'true'
 Set-IniValue $Ini 'EmuCore/GS' 'Renderer' '13'

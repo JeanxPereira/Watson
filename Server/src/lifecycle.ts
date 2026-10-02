@@ -9,9 +9,44 @@ export interface Host {
   terminate(pid: number): Promise<void>;
 }
 
-export interface LaunchOptions { bios?: string; elf?: string; state?: string; interpreter?: boolean; visible?: boolean; gameArgs?: string; }
+export interface LaunchOptions { bios?: string; elf?: string; state?: string; interpreter?: boolean; visible?: boolean; gameArgs?: string; instance?: number; }
 
-const pidFile = (root: string) => path.join(root, 'Runtime', 'watson.pid');
+const pidFile = (root: string, instance = 0) => path.join(root, 'Runtime', instance ? `watson-${instance}.pid` : 'watson.pid');
+/** Instance 0 listens on 21512; each further instance one port on. */
+export const debugPort = (instance: number) => 21512 + instance;
+export const dataDirectory = (root: string, instance: number) => (instance ? path.join(root, 'Runtime', `instance-${instance}`) : path.join(root, 'Runtime'));
+
+/**
+ * Pick an emulator instance nobody is using and mark it as taken by this process, so that
+ * several servers can each run their own emulator. With one instance configured nothing is
+ * claimed and a second launch fails on the port, as it always did. Instance 0 is tried last:
+ * it is the one a server uses when it was not the one that launched.
+ */
+export async function claimInstance(host: Host, root: string, count: number, self: number = process.pid): Promise<number> {
+  if (count <= 1) return 0;
+  fs.mkdirSync(path.join(root, 'Runtime'), { recursive: true });
+  for (const instance of [...Array(count - 1).keys()].map((i) => i + 1).concat(0)) {
+    const file = pidFile(root, instance);
+    if (fs.existsSync(file)) {
+      const holder = Number(fs.readFileSync(file, 'utf8').trim());
+      if (holder && (holder === self || await host.isRunning(holder))) continue;
+      fs.rmSync(file, { force: true });
+    }
+    try {
+      fs.writeFileSync(file, String(self), { flag: 'wx' });
+      return instance;
+    } catch (error: any) {
+      if (error.code !== 'EEXIST') throw error;
+    }
+  }
+  throw new Error(`all ${count} emulator instances are in use`);
+}
+
+/** Give back an instance that was claimed and never got an emulator. */
+export function releaseClaim(root: string, instance: number, self: number = process.pid): void {
+  const file = pidFile(root, instance);
+  if (fs.existsSync(file) && Number(fs.readFileSync(file, 'utf8').trim()) === self) fs.rmSync(file, { force: true });
+}
 const emulatorPath = (root: string) => path.join(root, 'References', 'pcsx2', 'build', 'pcsx2-qt', 'Release', 'pcsx2-qt.exe');
 const same = (a: string, b: string) => path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase();
 
@@ -23,6 +58,7 @@ export async function launch(host: Host, root: string, options: LaunchOptions): 
   if (options.interpreter) args.push('-Interpreter');
   if (options.visible) args.push('-Visible');
   if (options.gameArgs) args.push('-GameArgs', options.gameArgs);
+  if (options.instance) args.push('-Instance', String(options.instance));
 
   const { code, output } = await host.run('pwsh', args);
   const started = /pcsx2 pid (\d+)/.exec(output);
@@ -32,7 +68,7 @@ export async function launch(host: Host, root: string, options: LaunchOptions): 
   }
   const pid = Number(started[1]);
   fs.mkdirSync(path.dirname(pidFile(root)), { recursive: true });
-  fs.writeFileSync(pidFile(root), String(pid));
+  fs.writeFileSync(pidFile(root, options.instance), String(pid));
   return pid;
 }
 
@@ -79,7 +115,7 @@ export async function launchAndWait(host: Host, root: string, options: LaunchOpt
 
   while (Date.now() < deadline) {
     if (!(await host.isRunning(pid))) {
-      fs.rmSync(pidFile(root), { force: true });
+      fs.rmSync(pidFile(root, options.instance), { force: true });
       throw new Error(`pid ${pid} exited before the DebugServer answered (last: ${last})${log()}`);
     }
     try {
@@ -93,15 +129,16 @@ export async function launchAndWait(host: Host, root: string, options: LaunchOpt
   }
 
   await host.terminate(pid);
-  fs.rmSync(pidFile(root), { force: true });
+  fs.rmSync(pidFile(root, options.instance), { force: true });
   throw new Error(`pid ${pid} never became usable within ${wait.timeoutMs} ms and was terminated (last: ${last})${log()}`);
 }
 
-export async function kill(host: Host, root: string): Promise<string> {
-  if (!fs.existsSync(pidFile(root))) throw new Error('no Watson emulator was launched from this checkout');
-  const pid = Number(fs.readFileSync(pidFile(root), 'utf8').trim());
+export async function kill(host: Host, root: string, instance = 0): Promise<string> {
+  const file = pidFile(root, instance);
+  if (!fs.existsSync(file)) throw new Error('no Watson emulator was launched from this checkout');
+  const pid = Number(fs.readFileSync(file, 'utf8').trim());
   if (!(await host.isRunning(pid))) {
-    fs.rmSync(pidFile(root));
+    fs.rmSync(file);
     return `pid ${pid} had already exited`;
   }
   const found = await host.processPath(pid);
@@ -112,7 +149,7 @@ export async function kill(host: Host, root: string): Promise<string> {
     throw new Error(`pid ${pid} now belongs to ${found}, not the Watson emulator; not killing it`);
   }
   await host.terminate(pid);
-  fs.rmSync(pidFile(root));
+  fs.rmSync(file);
   return `terminated pid ${pid}`;
 }
 

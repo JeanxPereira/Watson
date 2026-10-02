@@ -46,6 +46,8 @@ if (-not (Test-Path $Ini)) {
 }
 Set-IniValue $Ini 'UI' 'SetupWizardIncomplete' 'false'
 Set-IniValue $Ini 'EmuCore' 'EnablePINE' 'true'
+# A program booted from an ELF may read files beside it through host: (HDD OSD reads its resources that way).
+Set-IniValue $Ini 'EmuCore' 'HostFs' 'true'
 Set-IniValue $Ini 'EmuCore/GS' 'Renderer' '13'
 Set-IniValue $Ini 'EmuCore/GS' 'GSDumpCompression' '0'
 Set-IniValue $Ini 'EmuCore/GS' 'ScreenshotSize' '2'

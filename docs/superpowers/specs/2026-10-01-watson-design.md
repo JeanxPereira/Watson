@@ -242,8 +242,16 @@ readable and the trace goes on. A malformed probe refuses the whole trace.
 
 A probe is how arithmetic read from disassembly becomes a measured fact: probe the function's
 entry for its real inputs, recompute the output with the formula read, and compare with the
-packet that follows in the same trace. The EE cuts single-precision results toward zero; a
-recomputation that rounds to nearest is off by one unit in a fraction of a percent of values.
+packet that follows in the same trace. PCSX2 runs the EE's FPU and VU0 cutting results toward
+zero (its default, `ChopZero`), and a recomputation must do the same: on the first capture
+checked, rounding to nearest left 15 of 12 292 values off by one unit, and of the four IEEE
+modes only toward zero left none. That is the emulator's model of the machine, not a
+measurement of the hardware.
+
+Limits of a probe: it matches one exact virtual address; an instruction re-executed after a
+TLB miss fires twice; `at` counts packets already delivered, so a probe that fires while a
+transfer is still in flight is placed one packet early. A base address must be written with
+`0x`.
 
 Cost: with a trace running, every DMA start walks the EE stack, about 3 ms each. The OSDSYS
 clock starts 677 per frame, so a traced frame takes about 2 s. `frame_advance` allows 20 s per

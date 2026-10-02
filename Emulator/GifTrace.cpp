@@ -241,9 +241,13 @@ namespace GifTrace
 					}
 					if (range.reg < 0)
 					{
+						// An address must carry its 0x: "A0" or "b0" would otherwise be read as one.
 						u32 absolute = 0;
-						if (plus != std::string::npos || !parseHex(base, &absolute))
-							return bad("a base is neither a register name nor a hex address");
+						const bool prefixed = base.size() > 2 && base[0] == '0' && (base[1] == 'x' || base[1] == 'X');
+						if (!prefixed || !parseHex(base, &absolute))
+							return bad("a base is neither a register name nor a 0x address");
+						if (plus != std::string::npos)
+							return bad("an address takes no offset; write the sum");
 						range.reg = 0;
 						range.offset = absolute;
 					}
@@ -271,7 +275,7 @@ namespace GifTrace
 		if (address >= 0x70000000u && address < 0x70000000u + Ps2MemSize::Scratch)
 		{
 			const u32 at = address - 0x70000000u;
-			return at + length <= Ps2MemSize::Scratch ? eeMem->Scratch + at : nullptr;
+			return length <= Ps2MemSize::Scratch - at ? eeMem->Scratch + at : nullptr;
 		}
 		const u32 physical = address >= 0x80000000u ? (address & 0x1fffffffu) : address;
 		if (physical < Ps2MemSize::MainRam && length <= Ps2MemSize::MainRam - physical)

@@ -379,7 +379,8 @@ test('live: probes at the two channel-start instructions fire once per origin', 
     for (const origin of plain.origins.values()) starts.set(origin.channel, origin.pc);
     assert.ok(starts.has('vif1') || starts.has('gif'), 'the screen starts no DMA channel; use a state that draws');
 
-    const probes = [...starts.values()].map((pc) => ({ pc, ranges: ['sp:0x20', '*0x0:0x10'] }));
+    // 0x10000000 is hardware registers, not memory a probe may read.
+    const probes = [...starts.values()].map((pc) => ({ pc, ranges: ['sp:0x20', '*0x0:0x10', '0x10000000:0x10'] }));
     const probed = readTrace((await takeGifTrace(client, path.join(dir, 'probed.png'), 1, probes)).trace);
     assert.equal(probed.complete, true, probed.reason);
     for (const [channel, pc] of starts) {
@@ -392,6 +393,8 @@ test('live: probes at the two channel-start instructions fire once per origin', 
     assert.equal(hit.mem[0].address, hit.gpr[29]);
     // The pointer at address 0 is whatever the kernel keeps there; it must be read or refused, never crash.
     assert.ok(hit.mem[1].bytes === null || hit.mem[1].bytes.length === 0x10);
+    assert.equal(hit.mem[2].bytes, null, 'a range outside guest memory must be recorded as not readable');
+    assert.equal(probed.probes.filter((each) => each.mem[2].bytes !== null).length, 0);
   } finally {
     client.disconnect();
   }
@@ -408,6 +411,9 @@ test('live: a malformed probe is refused whole and leaves no trace running', asy
     const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'watson-probe-')), 'bad.trace.jsonl');
     await assert.rejects(client.gifTraceStart(file, [{ pc: '0x232da0', ranges: ['q9:0x10'] }]), /bad probe "0x232da0=q9:0x10".*register/);
     await assert.rejects(client.gifTraceStart(file, [{ pc: '0x232da0', ranges: ['a0:0x8000'] }]), /bad probe.*length/);
+    // A register name in the wrong case, or an address without 0x, must not be taken for something else.
+    await assert.rejects(client.gifTraceStart(file, [{ pc: '0x232da0', ranges: ['A0:0x10'] }]), /bad probe.*register name nor a 0x address/);
+    await assert.rejects(client.gifTraceStart(file, [{ pc: '0x232da0', ranges: ['28a348:0x4'] }]), /bad probe.*register name nor a 0x address/);
     assert.equal(fs.existsSync(file), false);
     await client.gifTraceStart(file);
     await client.gifTraceStop();

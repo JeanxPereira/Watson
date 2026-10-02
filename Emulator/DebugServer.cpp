@@ -21,7 +21,12 @@
 // ============================================================
 
 #ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #pragma comment(lib, "ws2_32.lib")
@@ -42,6 +47,8 @@ typedef int socket_t;
 #include "DebugInterface.h"
 #include "Breakpoints.h"
 #include "MipsStackWalk.h"
+#include "Host.h"
+#include "VMManager.h"
 
 #include <cstring>
 #include <cstdio>
@@ -50,6 +57,9 @@ typedef int socket_t;
 #include <thread>
 #include <atomic>
 #include <mutex>
+#include <future>
+#include <memory>
+#include <functional>
 #include <condition_variable>
 #include <sstream>
 #include <algorithm>
@@ -295,7 +305,53 @@ namespace DebugServer
 	// Command Handlers
 	// ============================================================
 
-	static std::string handleCommand(const std::string& jsonLine)
+	static std::atomic<bool> s_running{false};
+
+	// Runs fn on the CPU thread and waits for it. The CPU thread owns the recompiler and the
+	// breakpoint tables; touching them from the socket thread races it. The wait is bounded and
+	// watches s_running so a client thread can never keep Stop() from joining it.
+	static bool runOnCpuThread(std::function<void()> fn, int timeoutMs = 5000)
+	{
+		auto done = std::make_shared<std::promise<void>>();
+		std::future<void> finished = done->get_future();
+		Host::RunOnCPUThread([fn = std::move(fn), done]() {
+			fn();
+			done->set_value();
+		});
+		for (int waited = 0; waited < timeoutMs; waited += 20)
+		{
+			if (finished.wait_for(std::chrono::milliseconds(20)) == std::future_status::ready)
+				return true;
+			if (!s_running.load())
+				return false;
+		}
+		return false;
+	}
+
+	static bool waitUntilPaused(DebugInterface* cpu, int timeoutMs)
+	{
+		for (int waited = 0; waited < timeoutMs; waited += 1)
+		{
+			if (cpu->isCpuPaused())
+				return true;
+			if (!s_running.load())
+				return false;
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		}
+		return cpu->isCpuPaused();
+	}
+
+	static std::string errorReply(const std::string& message)
+	{
+		JsonBuilder j;
+		j.startObject();
+		j.kv("ok", false);
+		j.kv("error", message);
+		j.endObject();
+		return j.str();
+	}
+
+	static std::string handleOnCpuThread(const std::string& jsonLine)
 	{
 		auto params = parseJsonObject(jsonLine);
 		std::string cmd = getStr(params, "cmd");
@@ -303,17 +359,6 @@ namespace DebugServer
 		DebugInterface* cpu = getCpu(cpuName);
 
 		JsonBuilder j;
-
-		// Before the first VM boots the virtual memory map is unset: a read or a disassembly
-		// would follow a guest address as a host pointer. Only status is answerable then.
-		if (cmd != "status" && !cpu->isAlive())
-		{
-			j.startObject();
-			j.kv("ok", false);
-			j.kv("error", std::string("no VM is running; boot one before sending ") + cmd);
-			j.endObject();
-			return j.str();
-		}
 
 		// ----- STATUS -----
 		if (cmd == "status")
@@ -662,85 +707,6 @@ namespace DebugServer
 			j.kv("ok", true);
 			j.endObject();
 		}
-		// ----- STEP -----
-		else if (cmd == "step")
-		{
-			u32 pc = cpu->getPC();
-
-			// Skip current BP if we're sitting on one (matches PCSX2 GUI behavior)
-			CBreakPoints::SetSkipFirst(getBpCpu(cpuName), pc);
-
-			u32 nextPc = pc + 4;
-			CBreakPoints::AddBreakPoint(getBpCpu(cpuName), nextPc, true, true, true);
-			cpu->resumeCpu();
-
-			// Wait for it to hit (with timeout)
-			int timeout = 5000; // ms
-			while (!cpu->isCpuPaused() && timeout > 0)
-			{
-				std::this_thread::sleep_for(std::chrono::milliseconds(1));
-				timeout--;
-			}
-
-			u32 newPc = cpu->getPC();
-			bool inBios = (newPc < 0x00100000) || (newPc >= 0x80000000 && newPc < 0x80100000);
-
-			j.startObject();
-			j.kv("ok", true);
-			j.key("old_pc"); j.valHex32(pc);
-			j.key("new_pc"); j.valHex32(newPc);
-			j.kv("disasm", cpu->disasm(newPc, true));
-			j.kv("in_bios", inBios);
-
-			bool valid = true;
-			u32 opcode = cpu->Read32(newPc, &valid);
-			j.key("opcode"); j.valHex32(opcode);
-			j.endObject();
-		}
-		// ----- STEP OVER -----
-		else if (cmd == "step_over")
-		{
-			u32 pc = cpu->getPC();
-
-			// Skip current BP if we're sitting on one (matches PCSX2 GUI behavior)
-			CBreakPoints::SetSkipFirst(getBpCpu(cpuName), pc);
-
-			bool valid = true;
-			u32 opcode = cpu->Read32(pc, &valid);
-			u32 op = (opcode >> 26) & 63;
-
-			u32 bpAddr = pc + 8; // default: skip instruction + delay slot
-			if (op == 3 || // JAL
-				(op == 0 && (opcode & 63) == 9)) // JALR
-			{
-				bpAddr = pc + 8;
-			}
-			else
-			{
-				bpAddr = pc + 4;
-			}
-
-			CBreakPoints::AddBreakPoint(getBpCpu(cpuName), bpAddr, true, true, true);
-			cpu->resumeCpu();
-
-			int timeout = 10000;
-			while (!cpu->isCpuPaused() && timeout > 0)
-			{
-				std::this_thread::sleep_for(std::chrono::milliseconds(1));
-				timeout--;
-			}
-
-			u32 newPc = cpu->getPC();
-			bool inBios = (newPc < 0x00100000) || (newPc >= 0x80000000 && newPc < 0x80100000);
-
-			j.startObject();
-			j.kv("ok", true);
-			j.key("old_pc"); j.valHex32(pc);
-			j.key("new_pc"); j.valHex32(newPc);
-			j.kv("disasm", cpu->disasm(newPc, true));
-			j.kv("in_bios", inBios);
-			j.endObject();
-		}
 		// ----- GET THREADS -----
 		else if (cmd == "get_threads")
 		{
@@ -889,8 +855,79 @@ namespace DebugServer
 	// ============================================================
 	// TCP Server
 	// ============================================================
-	static std::atomic<bool> s_running{false};
+	// step and step_over arm a temporary breakpoint, let the CPU run, and wait for it to stop.
+	// The arming and the reading happen on the CPU thread; the waiting cannot.
+	static std::string handleStep(const std::string& cpuName, DebugInterface* cpu, bool over)
+	{
+		auto oldPc = std::make_shared<u32>(0);
+		const bool armed = runOnCpuThread([cpuName, cpu, over, oldPc]() {
+			const u32 pc = cpu->getPC();
+			*oldPc = pc;
+			CBreakPoints::SetSkipFirst(getBpCpu(cpuName), pc);
+			u32 target = pc + 4;
+			if (over)
+			{
+				bool valid = true;
+				const u32 opcode = cpu->Read32(pc, &valid);
+				const u32 op = (opcode >> 26) & 63;
+				if (op == 3 || (op == 0 && (opcode & 63) == 9))
+					target = pc + 8;
+			}
+			CBreakPoints::AddBreakPoint(getBpCpu(cpuName), target, true, true, true);
+			cpu->resumeCpu();
+		});
+		if (!armed)
+			return errorReply("the CPU thread did not accept the step");
+
+		const bool stopped = waitUntilPaused(cpu, over ? 10000 : 5000);
+
+		auto reply = std::make_shared<std::string>();
+		const bool read = runOnCpuThread([cpu, oldPc, stopped, reply]() {
+			const u32 newPc = cpu->getPC();
+			bool valid = true;
+			JsonBuilder j;
+			j.startObject();
+			j.kv("ok", stopped);
+			if (!stopped)
+				j.kv("error", std::string("the CPU did not stop at the step breakpoint in time"));
+			j.key("old_pc"); j.valHex32(*oldPc);
+			j.key("new_pc"); j.valHex32(newPc);
+			j.kv("disasm", cpu->disasm(newPc, true));
+			j.kv("in_bios", (newPc < 0x00100000) || (newPc >= 0x80000000 && newPc < 0x80100000));
+			j.key("opcode"); j.valHex32(cpu->Read32(newPc, &valid));
+			j.endObject();
+			*reply = j.str();
+		});
+		return read ? *reply : errorReply("the CPU thread did not report the step result");
+	}
+
+	static std::string handleCommand(const std::string& jsonLine)
+	{
+		auto params = parseJsonObject(jsonLine);
+		const std::string cmd = getStr(params, "cmd");
+		const std::string cpuName = getStr(params, "cpu", "ee");
+		DebugInterface* cpu = getCpu(cpuName);
+
+		// status reads only what is valid before any VM exists, and must answer even when the
+		// CPU thread is busy.
+		if (cmd == "status")
+			return handleOnCpuThread(jsonLine);
+
+		if (!cpu->isAlive())
+			return errorReply("no VM is running; boot one before sending " + cmd);
+
+		if (cmd == "step" || cmd == "step_over")
+			return handleStep(cpuName, cpu, cmd == "step_over");
+
+		auto reply = std::make_shared<std::string>();
+		const bool ran = runOnCpuThread([jsonLine, reply]() { *reply = handleOnCpuThread(jsonLine); });
+		return ran ? *reply : errorReply("the CPU thread did not run " + cmd + " in time");
+	}
+
 	static std::thread s_serverThread;
+	static std::thread s_clientThread;
+	static std::atomic<bool> s_clientActive{false};
+	static std::atomic<socket_t> s_clientSocket{SOCKET_INVALID};
 	static socket_t s_listenSocket = SOCKET_INVALID;
 
 	static void clientHandler(socket_t clientSock)
@@ -926,7 +963,9 @@ namespace DebugServer
 			}
 		}
 
-		CLOSE_SOCKET(clientSock);
+		if (s_clientSocket.exchange(SOCKET_INVALID) == clientSock)
+			CLOSE_SOCKET(clientSock);
+		s_clientActive.store(false);
 	}
 
 	static void serverLoop(int port)
@@ -992,10 +1031,19 @@ namespace DebugServer
 			socket_t clientSock = accept(s_listenSocket, nullptr, nullptr);
 			if (clientSock == SOCKET_INVALID) continue;
 
-			fprintf(stderr, "[DebugServer] Client connected\n");
+			if (s_clientActive.load())
+			{
+				const std::string refusal = errorReply("another client is connected") + "\n";
+				send(clientSock, refusal.c_str(), (int)refusal.size(), 0);
+				CLOSE_SOCKET(clientSock);
+				continue;
+			}
 
-			// Handle client in a new thread
-			std::thread(clientHandler, clientSock).detach();
+			if (s_clientThread.joinable())
+				s_clientThread.join();
+			s_clientActive.store(true);
+			s_clientSocket.store(clientSock);
+			s_clientThread = std::thread(clientHandler, clientSock);
 		}
 
 		CLOSE_SOCKET(s_listenSocket);
@@ -1008,20 +1056,24 @@ namespace DebugServer
 
 	void Start(int port)
 	{
-		if (s_running.load()) return;
-		s_running.store(true);
+		if (s_running.exchange(true)) return;
 		s_serverThread = std::thread(serverLoop, port);
-		s_serverThread.detach();
 	}
 
 	void Stop()
 	{
-		s_running.store(false);
-		if (s_listenSocket != SOCKET_INVALID)
-		{
-			CLOSE_SOCKET(s_listenSocket);
-			s_listenSocket = SOCKET_INVALID;
-		}
+		if (!s_running.exchange(false)) return;
+
+		// Closing the client socket wakes recv(); s_running going false wakes any wait on the
+		// CPU thread. Only then can both threads be joined from the CPU thread itself.
+		const socket_t client = s_clientSocket.exchange(SOCKET_INVALID);
+		if (client != SOCKET_INVALID)
+			CLOSE_SOCKET(client);
+
+		if (s_serverThread.joinable())
+			s_serverThread.join();
+		if (s_clientThread.joinable())
+			s_clientThread.join();
 	}
 
 	bool IsRunning()

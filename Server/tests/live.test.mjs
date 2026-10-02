@@ -95,3 +95,20 @@ test('live: Pine IPC is enabled in the Watson runtime', async (t) => {
     await client.close();
   }
 });
+
+test('live: a second client is refused while the first keeps working', async (t) => {
+  if (!(await listening())) return t.skip(`nothing listening on 127.0.0.1:${PORT}; start Emulator/Run.ps1`);
+  const first = new DebugServerClient('127.0.0.1', PORT);
+  await first.connect();
+  const second = new DebugServerClient('127.0.0.1', PORT);
+  try {
+    await first.getStatus();
+    await second.connect();
+    await assert.rejects(second.getStatus(), /another client|closed|ECONNRESET/i);
+    const st = await first.getStatus();
+    assert.equal(typeof st.alive, 'boolean');
+  } finally {
+    first.disconnect();
+    second.disconnect();
+  }
+});

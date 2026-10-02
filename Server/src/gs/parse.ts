@@ -1,10 +1,11 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { walkGsDump } from '../gsdump.js';
+import { walkGsDump, dumpPackets } from '../gsdump.js';
 import { REG, registerName, decodeRegister, hex64 } from './registers.js';
 import { GifPath } from './gif.js';
 import { GsState } from './state.js';
 import { DrawAssembler, Draw } from './draws.js';
+import { Trace, readTrace, compareTraceToDump, sourceAt, describeSource } from './trace.js';
 
 /**
  * Turn a GS dump into JSON Lines (header, initial state, then draws, transfers and frame marks
@@ -28,14 +29,17 @@ export interface Summary {
   tests: Record<string, number>;
   uploads: Record<string, number>;
   copies: Record<string, number>;
+  /** With a trace: where the data of each draw's first primitive came from, by draw count. */
+  sources: Record<string, number>;
 }
 
 export interface ParseOptions {
   /** Also record every GIF tag and every register write, in arrival order. */
   writes?: boolean;
+  /** A GIF trace of the same capture: every draw is tied to where its data came from. */
+  trace?: string;
 }
 
-const REGISTERS = 8192;
 const hex = (value: number, digits: number) => `0x${value.toString(16).padStart(digits, '0')}`;
 const bump = (table: Record<string, number>, key: string) => { table[key] = (table[key] ?? 0) + 1; };
 
@@ -91,6 +95,13 @@ export function parseGsDump(file: string, out: string, options: ParseOptions = {
 
 function parseInto(file: string, sink: number, packets: number, options: ParseOptions): Summary {
   const data = fs.readFileSync(file);
+  let trace: Trace | null = null;
+  if (options.trace) {
+    trace = readTrace(options.trace);
+    if (!trace.complete) throw new Error(`${options.trace}: ${trace.reason}`);
+    const parity = compareTraceToDump(trace, data);
+    if (parity.mismatch) throw new Error(`${options.trace} is not a trace of this dump: ${parity.mismatch}`);
+  }
   const headerSize = data.readUInt32LE(4);
   const header = {
     stateVersion: data.readUInt32LE(8),
@@ -111,12 +122,13 @@ function parseInto(file: string, sink: number, packets: number, options: ParseOp
   const summary: Summary = {
     packets, frames: 0, draws: 0, writes: 0, imageBytes: 0,
     unknownRegisters: {}, perFrame: [], byPrimitive: {}, alpha: {}, blendingOff: 0,
-    frameTargets: {}, textures: {}, untextured: 0, tests: {}, uploads: {}, copies: {},
+    frameTargets: {}, textures: {}, untextured: 0, tests: {}, uploads: {}, copies: {}, sources: {},
   };
 
   const emit = (record: unknown) => fs.writeSync(sink, `${JSON.stringify(record)}\n`);
   emit({ type: 'header', file, bytes: data.length, serial, ...header, crc: hex(header.crc, 8) });
   emit({ type: 'state', context1: state.snapshot(0), context2: state.snapshot(1) });
+  if (trace) for (const origin of trace.origins.values()) emit({ type: 'origin', ...origin });
 
   /**
    * Records of the frame being read. `at` is arrival order; a draw takes the position where its
@@ -126,6 +138,8 @@ function parseInto(file: string, sink: number, packets: number, options: ParseOp
   let order = 0;
   const drawOrder = new Map<number, number>();
   let lastSeenDraw = -1;
+  /** The dump transfer packet, and the byte in it, that drew each draw's first primitive. */
+  const drawAt = new Map<number, { packet: number; at: number }>();
 
   const transfer = () => {
     const blit = decodeRegister('BITBLTBUF', state.get('BITBLTBUF'));
@@ -150,7 +164,16 @@ function parseInto(file: string, sink: number, packets: number, options: ParseOp
       summary.untextured += 1;
     }
     bump(summary.tests, describeTest(decoded.TEST));
-    return { type: 'draw', ...draw, decoded };
+    const where = drawAt.get(draw.index) ?? { packet: -1, at: 0 };
+    drawAt.delete(draw.index);
+    let source: Record<string, unknown> | undefined;
+    if (trace && where.packet >= 0) {
+      const packet = trace.packets[where.packet];
+      const found = sourceAt(packet, where.at);
+      bump(summary.sources, describeSource(trace, packet.path, found));
+      source = { path: packet.path, kind: found.kind, origin: found.origin, space: found.space, address: found.address, ...(found.vuTpc ? { vuTpc: found.vuTpc } : {}) };
+    }
+    return { type: 'draw', ...draw, decoded, packet: where.packet, at: where.at, ...(source ? { source } : {}) };
   };
 
   const flush = (): { draws: number; primitives: number } => {
@@ -167,14 +190,15 @@ function parseInto(file: string, sink: number, packets: number, options: ParseOp
     return { draws, primitives };
   };
 
-  let offset = blobAt + header.stateSize + REGISTERS;
-  while (offset < data.length) {
-    const type = data[offset];
-    if (type === 0) {
-      const id = data[offset + 1];
-      if (id > 3) throw new Error(`${file}: transfer at offset ${offset} names path ${id}; a dump has paths 0 to 3`);
-      const size = data.readUInt32LE(offset + 2);
-      for (const event of paths[id].feed(data.subarray(offset + 6, offset + 6 + size))) {
+  let ordinal = -1;
+  for (const packet of dumpPackets(data)) {
+    if (packet.type === 'transfer') {
+      ordinal += 1;
+      const id = packet.path;
+      if (id > 3) throw new Error(`${file}: transfer ${ordinal} names path ${id}; a dump has paths 0 to 3`);
+      const positions: number[] = [];
+      const events = paths[id].feed(packet.data, positions);
+      for (const [index, event] of events.entries()) {
         if (event.kind === 'image') {
           summary.imageBytes += event.bytes;
           if (options.writes) pending.push({ at: order++, record: { type: 'image', path: id, bytes: event.bytes } });
@@ -188,21 +212,19 @@ function parseInto(file: string, sink: number, packets: number, options: ParseOp
           assembler.apply(event.reg, event.value);
           if (event.reg === REG.TRXDIR) transfer();
           const open = assembler.openIndex();
-          if (open > lastSeenDraw) { drawOrder.set(open, order++); lastSeenDraw = open; }
+          if (open > lastSeenDraw) {
+            drawOrder.set(open, order++);
+            drawAt.set(open, { packet: ordinal, at: positions[index] });
+            lastSeenDraw = open;
+          }
         }
       }
-      offset += 6 + size;
-    } else if (type === 1) {
+    } else if (packet.type === 'vsync') {
       assembler.endFrame();
       const counts = flush();
-      emit({ type: 'frame', index: summary.frames, field: data[offset + 1], ...counts });
+      emit({ type: 'frame', index: summary.frames, field: packet.field, ...counts });
       summary.perFrame.push(counts);
       summary.frames += 1;
-      offset += 2;
-    } else if (type === 2) {
-      offset += 5;
-    } else {
-      offset += 1 + REGISTERS;
     }
   }
 
@@ -234,6 +256,7 @@ export function formatSummary(summary: Summary, file: string, out: string): stri
     ...table('tests', summary.tests),
     ...table('host uploads', summary.uploads),
     ...table('VRAM-to-VRAM copies', summary.copies),
+    ...(Object.keys(summary.sources).length > 0 ? table('draw sources', summary.sources) : []),
     ...table('unknown registers', summary.unknownRegisters),
     'build: unknown',
     `verdict: ${verdict}  coverage ${summary.packets}/${summary.packets}`,

@@ -168,3 +168,23 @@ test('an IMAGE path restored mid-packet consumes what is owed', () => {
     .feed(Buffer.concat([Buffer.alloc(32, 7), tag({ nloop: 1, regs: [0xe] }), aPlusD(REG.DTHE, 1n)]));
   assert.deepEqual(events.map((e) => e.kind), ['image', 'tag', 'write']);
 });
+
+test('feed reports where in the chunk each event began', () => {
+  const path = new GifPath();
+  const positions = [];
+  const events = path.feed(Buffer.concat([tag({ nloop: 2, regs: [0xe] }), qword(1n, 0x42n), qword(2n, 0x43n)]), positions);
+  assert.deepEqual(events.map((e) => e.kind), ['tag', 'write', 'write']);
+  assert.deepEqual(positions, [0, 16, 32]);
+});
+
+test('an item that began in an earlier chunk is placed at 0 of the chunk that completed it', () => {
+  const path = new GifPath();
+  const whole = Buffer.concat([tag({ nloop: 1, regs: [0xe] }), qword(1n, 0x42n)]);
+  const first = [];
+  path.feed(whole.subarray(0, 24), first);
+  const second = [];
+  const events = path.feed(whole.subarray(24), second);
+  assert.deepEqual(first, [0]);
+  assert.deepEqual(events.map((e) => e.kind), ['write']);
+  assert.deepEqual(second, [0]);
+});

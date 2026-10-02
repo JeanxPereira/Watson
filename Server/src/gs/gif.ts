@@ -72,18 +72,30 @@ export class GifPath {
 
   get pendingBytes(): number { return this.buffer.length; }
 
-  feed(chunk: Buffer): GifEvent[] {
+  /**
+   * `positions`, when given, receives one entry per event: the offset in `chunk` of the data
+   * item that produced it, 0 for an item that began in an earlier chunk.
+   */
+  feed(chunk: Buffer, positions?: number[]): GifEvent[] {
+    const carried = this.buffer.length;
     this.buffer = this.buffer.length ? Buffer.concat([this.buffer, chunk]) : chunk;
     const events: GifEvent[] = [];
     let offset = 0;
+    let item = 0;
     const available = () => this.buffer.length - offset;
+    const settle = () => {
+      if (positions) while (positions.length < events.length) positions.push(Math.max(0, item - carried));
+    };
 
     for (;;) {
+      settle();
+      item = offset;
       if (!this.tag) {
         if (this.padding > 0) {
           if (available() < this.padding) break;
           offset += this.padding;
           this.padding = 0;
+          item = offset;
         }
         if (available() < 16) break;
         const tag = readTag(this.buffer.subarray(offset, offset + 16));
@@ -132,6 +144,7 @@ export class GifPath {
       }
       if (this.remaining === 0) this.tag = null;
     }
+    settle();
 
     this.buffer = offset === this.buffer.length ? Buffer.alloc(0) : Buffer.from(this.buffer.subarray(offset));
     return events;

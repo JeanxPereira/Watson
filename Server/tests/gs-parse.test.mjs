@@ -6,6 +6,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { parseGsDump, formatSummary, describeAlpha } from '../dist/gs/parse.js';
 import { REG } from '../dist/gs/registers.js';
+import { dumpPackets } from '../dist/gsdump.js';
 
 const u32 = (...values) => { const b = Buffer.alloc(4 * values.length); values.forEach((v, i) => b.writeUInt32LE(v >>> 0, 4 * i)); return b; };
 const qword = (lo, hi = 0n) => { const b = Buffer.alloc(16); b.writeBigUInt64LE(BigInt.asUintN(64, lo), 0); b.writeBigUInt64LE(BigInt.asUintN(64, hi), 8); return b; };
@@ -213,4 +214,70 @@ test('the CLI parses a dump and exits 0', () => {
   assert.equal(result.status, 0);
   assert.match(result.stdout, /verdict: FOUND 1/);
   assert.equal(fs.existsSync(out), true);
+});
+
+function traceFor(file, sources, { corrupt = false } = {}) {
+  const records = [{ type: 'header', version: 1, frame: 0 },
+    { type: 'origin', id: 1, channel: 'vif1', frame: 0, chcr: '0x00000145', madr: '0x00300000', qwc: 0, tadr: '0x00300000', pc: '0x00220000', ra: '0x00221000', sp: '0x01ff0000', stack: [] },
+    { type: 'vsync', frame: 0 }];
+  let packets = 0;
+  for (const packet of dumpPackets(fs.readFileSync(file))) {
+    if (packet.type === 'vsync') records.push({ type: 'vsync', frame: 1 });
+    if (packet.type !== 'transfer') continue;
+    const data = Buffer.from(packet.data);
+    if (corrupt) data[0] ^= 0xff;
+    for (const source of sources(data.length)) records.push({ type: 'data', path: 1, ...source });
+    records.push({ type: 'packet', path: 1, size: data.length, pending: 0, hex: data.toString('hex') });
+    packets += 1;
+  }
+  records.push({ type: 'end', packets });
+  const trace = file.replace(/\.gs$/, '.trace.jsonl');
+  fs.writeFileSync(trace, records.map((r) => JSON.stringify(r)).join('\n') + '\n');
+  return trace;
+}
+
+test('every draw says which packet and byte drew its first primitive', () => {
+  const { file, out } = write(dump(SCENE));
+  parseGsDump(file, out);
+  const draw = lines(out).find((r) => r.type === 'draw');
+  assert.equal(draw.packet, 0);
+  assert.equal(draw.at, 112);   // tag, three A+D, tag, two vertices: the third vertex completes the first triangle
+});
+
+test('with a trace, a draw names the chunk and origin its first primitive came from', () => {
+  const { file, out } = write(dump(SCENE));
+  const trace = traceFor(file, (size) => [
+    { kind: 'xgkick', origin: 1, space: 'vu1', address: 0x100, size: 64, vuTpc: '0x0120' },
+    { kind: 'xgkick', origin: 1, space: 'vu1', address: 0x800, size: size - 64, vuTpc: '0x0340' }]);
+  const summary = parseGsDump(file, out, { trace });
+  const records = lines(out);
+  assert.deepEqual(records.map((r) => r.type), ['header', 'state', 'origin', 'draw', 'frame']);
+  assert.deepEqual(records[3].source, { path: 1, kind: 'xgkick', origin: 1, space: 'vu1', address: 0x800 + 112 - 64, vuTpc: '0x0340' });
+  assert.deepEqual(summary.sources, { 'PATH1 xgkick vuTpc 0x0340, DMA started at pc 0x00220000 ra 0x00221000': 1 });
+  assert.match(formatSummary(summary, file, out), /draw sources:\n\s+1  PATH1 xgkick vuTpc 0x0340/);
+});
+
+test('a trace of another capture is refused and no output is left', () => {
+  const { file, out } = write(dump(SCENE));
+  const trace = traceFor(file, (size) => [{ kind: 'dma', origin: 0, space: 'host', address: 0, size }], { corrupt: true });
+  assert.throws(() => parseGsDump(file, out, { trace }), /is not a trace of this dump: packet 0 differs at byte 0/);
+  assert.equal(fs.existsSync(out), false);
+});
+
+test('a trace that was never stopped is refused', () => {
+  const { file, out } = write(dump(SCENE));
+  const trace = traceFor(file, (size) => [{ kind: 'dma', origin: 0, space: 'host', address: 0, size }]);
+  fs.writeFileSync(trace, fs.readFileSync(trace, 'utf8').split('\n').slice(0, -2).join('\n') + '\n');
+  assert.throws(() => parseGsDump(file, out, { trace }), /no end record/);
+});
+
+test('the CLI takes --trace and refuses it with no value', () => {
+  const { file } = write(dump(SCENE));
+  const trace = traceFor(file, (size) => [{ kind: 'dma', origin: 0, space: 'host', address: 0, size }]);
+  const good = spawnSync(process.execPath, ['dist/cli.js', 'parse', file, '--trace', trace], { encoding: 'utf8' });
+  assert.equal(good.status, 0, good.stdout + good.stderr);
+  assert.match(good.stdout, /draw sources:/);
+  const bad = spawnSync(process.execPath, ['dist/cli.js', 'parse', file, '--trace'], { encoding: 'utf8' });
+  assert.equal(bad.status, 1);
+  assert.match(bad.stderr, /--trace needs a file/);
 });

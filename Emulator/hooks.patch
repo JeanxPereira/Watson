@@ -28,22 +28,109 @@ index a177f39..8758bf9 100644
  
  	// Move back to the UI thread, since we're no longer running.
 diff --git a/pcsx2/CMakeLists.txt b/pcsx2/CMakeLists.txt
-index 4c8ce81..9a2b1cf 100644
+index 4c8ce81..f9d80bc 100644
 --- a/pcsx2/CMakeLists.txt
 +++ b/pcsx2/CMakeLists.txt
-@@ -817,6 +817,7 @@ set(pcsx2DebugToolsSources
+@@ -817,6 +817,8 @@ set(pcsx2DebugToolsSources
  	DebugTools/DisR5900asm.cpp
  	DebugTools/DisVU0Micro.cpp
  	DebugTools/DisVU1Micro.cpp
 +	DebugTools/DebugServer.cpp
++	DebugTools/GifTrace.cpp
  	DebugTools/BiosDebugData.cpp)
  
  # DebugTools headers
-@@ -835,6 +836,7 @@ set(pcsx2DebugToolsHeaders
+@@ -835,6 +837,8 @@ set(pcsx2DebugToolsHeaders
  	DebugTools/DisASM.h
  	DebugTools/DisVUmicro.h
  	DebugTools/DisVUops.h
 +	DebugTools/DebugServer.h
++	DebugTools/GifTrace.h
  	DebugTools/BiosDebugData.h)
  
  set(pcsx2HostSources
+diff --git a/pcsx2/GS.cpp b/pcsx2/GS.cpp
+index a16d1b9..9a72202 100644
+--- a/pcsx2/GS.cpp
++++ b/pcsx2/GS.cpp
+@@ -331,6 +331,7 @@ void gsPostVsyncStart()
+ 
+ 	const bool registers_written = s_GSRegistersWritten;
+ 	s_GSRegistersWritten = false;
++	GifTrace::OnVsync();
+ 	MTGS::PostVsyncStart(registers_written);
+ }
+ 
+diff --git a/pcsx2/Gif.cpp b/pcsx2/Gif.cpp
+index 72c2870..8b109ce 100644
+--- a/pcsx2/Gif.cpp
++++ b/pcsx2/Gif.cpp
+@@ -464,6 +464,7 @@ void GIFdma()
+ 
+ void dmaGIF()
+ {
++	GifTrace::OnOrigin(2);
+ 	// DevCon.Warning("dmaGIFstart chcr = %lx, madr = %lx, qwc  = %lx\n tadr = %lx, asr0 = %lx, asr1 = %lx", gifch.chcr._u32, gifch.madr, gifch.qwc, gifch.tadr, gifch.asr0, gifch.asr1);
+ 
+ 	gif.gspath3done = false; // For some reason this doesn't clear? So when the system starts the thread, we will clear it :)
+diff --git a/pcsx2/Gif_Unit.h b/pcsx2/Gif_Unit.h
+index 6b6fde5..b1b10db 100644
+--- a/pcsx2/Gif_Unit.h
++++ b/pcsx2/Gif_Unit.h
+@@ -8,6 +8,7 @@
+ #include "GS.h"
+ #include "GS/GSRegs.h"
+ #include "MTGS.h"
++#include "DebugTools/GifTrace.h"
+ 
+ // FIXME common path ?
+ #include "common/boost_spsc_queue.hpp"
+@@ -247,6 +248,7 @@ struct Gif_Path
+ 				GUNIT_WARN("Gif Path %d - Soft Reset", idx + 1);
+ 				gifTag.Reset();
+ 				gsPack.Reset();
++				GifTrace::OnRewind(idx, curSize - curOffset);
+ 				curSize = curOffset;
+ 				gsPack.offset = curOffset;
+ 			}
+@@ -429,6 +431,7 @@ struct Gif_Path
+ 						//Including breaking packets early (Rewind DMA to pick up where left off)
+ 						//but only do this when the path is masked, else we're pointlessly slowing things down.
+ 						dmaRewind = curSize - curOffset;
++						GifTrace::OnRewind(idx, dmaRewind);
+ 						curSize = curOffset;
+ 					}
+ 				}
+@@ -690,6 +693,7 @@ struct Gif_Unit
+ 			} // DirectHL Stall
+ 		}
+ 
++		GifTrace::OnData(tranType, pMem, size);
+ 		gifPath[tranType & 3].CopyGSPacketData(pMem, size, aligned);
+ 		size -= Execute(tranType == GIF_TRANS_DMA, false);
+ 		return size;
+diff --git a/pcsx2/MTGS.cpp b/pcsx2/MTGS.cpp
+index 59f5aa0..29a9c97 100644
+--- a/pcsx2/MTGS.cpp
++++ b/pcsx2/MTGS.cpp
+@@ -1064,6 +1064,8 @@ void Gif_AddGSPacketMTVU(GS_Packet& gsPack, GIF_PATH path)
+ void Gif_AddCompletedGSPacket(GS_Packet& gsPack, GIF_PATH path)
+ {
+ 	//DevCon.WriteLn("Adding Completed Gif Packet [size=%x]", gsPack.size);
++	GifTrace::OnPacket(path, &gifUnit.gifPath[path].buffer[gsPack.offset], gsPack.size,
++		gifUnit.gifPath[path].curSize - (gsPack.offset + gsPack.size));
+ 	if (COPY_GS_PACKET_TO_MTGS)
+ 	{
+ 		MTGS::PrepDataPacket(path, gsPack.size / 16);
+diff --git a/pcsx2/Vif1_Dma.cpp b/pcsx2/Vif1_Dma.cpp
+index c85af24..7402a05 100644
+--- a/pcsx2/Vif1_Dma.cpp
++++ b/pcsx2/Vif1_Dma.cpp
+@@ -473,6 +473,7 @@ __fi void vif1Interrupt()
+ 
+ void dmaVIF1()
+ {
++	GifTrace::OnOrigin(1);
+ 	VIF_LOG("dmaVIF1 chcr = %lx, madr = %lx, qwc  = %lx\n"
+ 			"        tadr = %lx, asr0 = %lx, asr1 = %lx",
+ 		vif1ch.chcr._u32, vif1ch.madr, vif1ch.qwc,

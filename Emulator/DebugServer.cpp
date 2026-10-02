@@ -44,6 +44,7 @@ typedef int socket_t;
 #endif
 
 #include "DebugServer.h"
+#include "GifTrace.h"
 #include "DebugInterface.h"
 #include "Breakpoints.h"
 #include "MipsStackWalk.h"
@@ -425,6 +426,7 @@ namespace DebugServer
 			j.key("pc"); j.valHex32(cpu->getPC());
 			j.kv("cycles", (int64_t)cpu->getCycles());
 			j.kv("frame", (int64_t)g_FrameCount);
+			j.kv("interpreter", GifTrace::InterpretersActive());
 			j.endObject();
 			j.endObject();
 		}
@@ -955,6 +957,30 @@ namespace DebugServer
 			j.kv("ok", true);
 			j.endObject();
 		}
+		// ----- GIF TRACE -----
+		else if (cmd == "gif_trace_start")
+		{
+			const std::string path = wirePath(params, "path");
+			if (path.empty())
+				return errorReply("path is required");
+			const std::string refused = GifTrace::Start(path);
+			if (!refused.empty())
+				return errorReply(refused);
+			j.startObject();
+			j.kv("ok", true);
+			j.endObject();
+		}
+		else if (cmd == "gif_trace_stop")
+		{
+			u64 packets = 0;
+			const std::string failed = GifTrace::Stop(&packets);
+			if (!failed.empty())
+				return errorReply(failed);
+			j.startObject();
+			j.kv("ok", true);
+			j.kv("packets", (int64_t)packets);
+			j.endObject();
+		}
 		// ----- UNKNOWN COMMAND -----
 		else
 		{
@@ -971,7 +997,8 @@ namespace DebugServer
 				"pause", "resume", "step", "step_over",
 				"get_threads", "get_modules",
 				"is_valid_address", "clear_breakpoints",
-				"frame_advance", "pad_set", "queue_snapshot", "save_state_file", "load_state_file"
+				"frame_advance", "pad_set", "queue_snapshot", "save_state_file", "load_state_file",
+				"gif_trace_start", "gif_trace_stop"
 			};
 			for (const char* c : cmds) j.valStr(c);
 			j.endArray();
@@ -1045,8 +1072,8 @@ namespace DebugServer
 			return errorReply(cpuRunFailure(armed, "frame_advance"));
 
 		// FrameAdvance switched the VM to Running on the CPU thread; it pauses itself after the
-		// last frame. Allow real time for slow frames.
-		const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000 + (int)count * 100);
+		// last frame. Allow real time for slow frames; interpreted ones are slower still.
+		const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000 + (int)count * (GifTrace::InterpretersActive() ? 2000 : 100));
 		while (std::chrono::steady_clock::now() < deadline)
 		{
 			if (!s_running.load())
@@ -1155,6 +1182,9 @@ namespace DebugServer
 		if (s_running.load())
 		{
 			runOnCpuThread([]() {
+				// A trace the client left running would keep its file open and keep growing.
+				u64 packets = 0;
+				GifTrace::Stop(&packets);
 				if (!VMManager::HasValidVM())
 					return;
 				for (const PadButton& button : s_padButtons)

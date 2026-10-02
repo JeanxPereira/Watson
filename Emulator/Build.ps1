@@ -33,14 +33,18 @@ if (-not (Test-Path (Join-Path $Tree 'deps\lib\cmake\Qt6'))) {
     }
 }
 
-Copy-Item (Join-Path $PSScriptRoot 'DebugServer.cpp') (Join-Path $Tree 'pcsx2\DebugTools\DebugServer.cpp') -Force
-Copy-Item (Join-Path $PSScriptRoot 'DebugServer.h') (Join-Path $Tree 'pcsx2\DebugTools\DebugServer.h') -Force
+foreach ($Name in 'DebugServer.cpp', 'DebugServer.h', 'GifTrace.cpp', 'GifTrace.h') {
+    Copy-Item (Join-Path $PSScriptRoot $Name) (Join-Path $Tree "pcsx2\DebugTools\$Name") -Force
+}
 
 & git -C $Tree apply --reverse --check $Hooks 2>$null
 if ($LASTEXITCODE -eq 0) {
     Write-Host 'hooks already applied'
 } else {
-    Run git @('-C', $Tree, 'apply', '--check', $Hooks)
+    # The tree may carry an older version of the hooks: put every hooked file back first.
+    $Hooked = @(& git -C $Tree apply --numstat $Hooks | ForEach-Object { ($_ -split "`t")[2] })
+    if ($Hooked.Count -eq 0) { Fail 'hooks.patch names no file' }
+    Run git (@('-C', $Tree, 'checkout', '--') + $Hooked)
     Run git @('-C', $Tree, 'apply', $Hooks)
     Write-Host 'hooks applied'
 }

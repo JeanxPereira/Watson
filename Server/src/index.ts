@@ -11,6 +11,11 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 import { DebugServerClient } from './debug-server-client.js';
 import { PineClient, EmuStatus } from './pine-client.js';
+import * as path from 'node:path';
+import * as fs from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { pressPad, takeSnapshot, takeGsDump } from './navigation.js';
+import { launch, kill, systemHost } from './lifecycle.js';
 
 // ===== State =====
 let debugServer: DebugServerClient | null = null;
@@ -41,6 +46,24 @@ function hexDump(buf: Buffer, base: number): string {
 function hasDebug(): boolean { return debugServer?.isConnected() ?? false; }  
 function hasPine(): boolean { return pine?.isConnected() ?? false; }
 
+const WATSON_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
+const CAPTURES = path.join(WATSON_ROOT, 'Runtime', 'captures');
+
+function requireDebug(): DebugServerClient {
+  if (!hasDebug()) throw new Error('No DebugServer connection — use watson_connect first');
+  return debugServer!;
+}
+
+function capturePath(given: string | undefined, stem: string): string {
+  const file = given ?? path.join(CAPTURES, `${stem}.png`);
+  if (!/\.png$/i.test(file)) throw new Error('path must end in .png');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  return file;
+}
+
+const text = (t: string) => ({ content: [{ type: 'text' as const, text: t }] });
+const failure = (e: any) => ({ content: [{ type: 'text' as const, text: `Error: ${e.message}` }], isError: true });
+
 async function readMem(addr: number, len: number): Promise<Buffer> {
   if (hasDebug()) return debugServer!.readMemoryBuffer('0x' + addr.toString(16), len);
   if (hasPine()) return pine!.readMemory(addr, len);
@@ -67,6 +90,7 @@ server.tool('watson_connect',
     // Try DebugServer
     if (mode === 'auto' || mode === 'debug') {
       try {
+        debugServer?.disconnect();
         debugServer = new DebugServerClient('127.0.0.1', debug_port);
         await debugServer.connect();
         const st = await debugServer.getStatus();
@@ -523,6 +547,106 @@ server.tool('watson_clear_all_breakpoints', 'Clear ALL breakpoints and watchpoin
     if (!hasDebug()) return { content: [{ type: 'text' as const, text: 'Error: DebugServer not connected.' }], isError: true };
     try { await debugServer!.clearAllBreakpoints(); return { content: [{ type: 'text' as const, text: 'All breakpoints and watchpoints cleared.' }] }; }
     catch (e: any) { return { content: [{ type: 'text' as const, text: `Error: ${e.message}` }], isError: true }; }
+  }
+);
+
+// ==========================================================
+//  Lifecycle
+// ==========================================================
+server.tool('watson_launch',
+  'Start the Watson PCSX2 and connect to it. Give a BIOS to boot it, optionally an ELF to run and a save state to load.',
+  { bios: z.string().optional(), elf: z.string().optional(), state: z.string().optional() },
+  async ({ bios, elf, state }) => {
+    try {
+      const pid = await launch(systemHost, WATSON_ROOT, { bios, elf, state });
+      const deadline = Date.now() + 60000;
+      let last = 'never tried';
+      while (Date.now() < deadline) {
+        try {
+          const client = new DebugServerClient('127.0.0.1', 21512);
+          await client.connect();
+          const st = await client.getStatus();
+          if (bios && !st.alive) { client.disconnect(); throw new Error('the VM has not booted yet'); }
+          debugServer?.disconnect();
+          debugServer = client;
+          return text(`launched pid ${pid}; connected; alive=${st.alive} frame=${st.frame}`);
+        } catch (e: any) { last = e.message; await new Promise((r) => setTimeout(r, 500)); }
+      }
+      throw new Error(`pid ${pid} started but no usable DebugServer within 60 s: ${last}`);
+    } catch (e: any) { return failure(e); }
+  }
+);
+
+server.tool('watson_kill', 'Terminate the PCSX2 that watson_launch started. Never touches another PCSX2.', {},
+  async () => {
+    try {
+      debugServer?.disconnect();
+      debugServer = null;
+      return text(await kill(systemHost, WATSON_ROOT));
+    } catch (e: any) { return failure(e); }
+  }
+);
+
+// ==========================================================
+//  Navigation: time, input, capture, state
+// ==========================================================
+server.tool('watson_frame_advance', 'Run exactly N frames, then pause. Returns the frame counter.',
+  { frames: z.number().int().min(1).max(3600).default(1) },
+  async ({ frames }) => {
+    try { return text(`frame ${await requireDebug().frameAdvance(frames)} (paused)`); }
+    catch (e: any) { return failure(e); }
+  }
+);
+
+server.tool('watson_pad',
+  'Hold pad buttons on port 1 for N frames, release, run one more frame. Leaves the VM paused. Buttons: up, right, down, left, triangle, circle, cross, square, select, start, l1, l2, r1, r2, l3, r3.',
+  { buttons: z.array(z.string()).min(1), frames: z.number().int().min(1).max(600).default(4) },
+  async ({ buttons, frames }) => {
+    try { return text(`pressed ${buttons.join('+')} for ${frames} frames; frame ${await pressPad(requireDebug(), buttons, frames)} (paused)`); }
+    catch (e: any) { return failure(e); }
+  }
+);
+
+server.tool('watson_snapshot', 'Write a PNG of the current frame from the software renderer. Advances 2 frames and leaves the VM paused.',
+  { path: z.string().optional().describe('Absolute .png path; default Runtime/captures/frame-<n>.png') },
+  async ({ path: given }) => {
+    try {
+      const client = requireDebug();
+      const frame = (await client.getStatus()).frame;
+      return text(await takeSnapshot(client, capturePath(given, `frame-${frame}`)));
+    } catch (e: any) { return failure(e); }
+  }
+);
+
+server.tool('watson_gs_dump', 'Capture N frames to an uncompressed GS dump (.gs) with a PNG beside it. Leaves the VM paused.',
+  { frames: z.number().int().min(1).max(600).default(1), path: z.string().optional().describe('Absolute .png path; the dump takes the same name with .gs') },
+  async ({ frames, path: given }) => {
+    try {
+      const client = requireDebug();
+      const frame = (await client.getStatus()).frame;
+      const files = await takeGsDump(client, capturePath(given, `dump-${frame}`), frames);
+      return text(`dump: ${files.dump}\npng: ${files.png}`);
+    } catch (e: any) { return failure(e); }
+  }
+);
+
+server.tool('watson_save_state_file', 'Save the emulator state to a file.', { path: z.string() },
+  async ({ path: file }) => {
+    try {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      await requireDebug().saveStateFile(file);
+      return text(`saved ${file}`);
+    } catch (e: any) { return failure(e); }
+  }
+);
+
+server.tool('watson_load_state_file', 'Load the emulator state from a file.', { path: z.string() },
+  async ({ path: file }) => {
+    try {
+      if (!fs.existsSync(file)) throw new Error(`no state file at ${file}`);
+      await requireDebug().loadStateFile(file);
+      return text(`loaded ${file}; frame ${(await requireDebug().getStatus()).frame}`);
+    } catch (e: any) { return failure(e); }
   }
 );
 

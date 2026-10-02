@@ -1,5 +1,5 @@
 #requires -Version 7
-param([string]$Bios)
+param([string]$Bios, [string]$Elf, [string]$State)
 
 $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent $PSScriptRoot
@@ -46,14 +46,28 @@ if (-not (Test-Path $Ini)) {
 }
 Set-IniValue $Ini 'UI' 'SetupWizardIncomplete' 'false'
 Set-IniValue $Ini 'EmuCore' 'EnablePINE' 'true'
+Set-IniValue $Ini 'EmuCore/GS' 'Renderer' '13'
+Set-IniValue $Ini 'EmuCore/GS' 'GSDumpCompression' '0'
+Set-IniValue $Ini 'EmuCore/GS' 'ScreenshotSize' '2'
 
 $Arguments = @('-datapath', "`"$Runtime`"")
 if ($Bios) {
-    $BiosFile = Get-Item $Bios -ErrorAction SilentlyContinue
+    $BiosFile = Get-Item -LiteralPath $Bios -ErrorAction SilentlyContinue
     if (-not $BiosFile) { Fail "BIOS not found: $Bios" }
     Set-IniValue $Ini 'Folders' 'Bios' $BiosFile.DirectoryName
     Set-IniValue $Ini 'Filenames' 'BIOS' $BiosFile.Name
+}
+if ($Elf) {
+    $ElfFile = Get-Item -LiteralPath $Elf -ErrorAction SilentlyContinue
+    if (-not $ElfFile) { Fail "ELF not found: $Elf" }
+    $Arguments += @('-elf', "`"$($ElfFile.FullName)`"")
+} elseif ($Bios) {
     $Arguments += '-bios'
+}
+if ($State) {
+    $StateFile = Get-Item -LiteralPath $State -ErrorAction SilentlyContinue
+    if (-not $StateFile) { Fail "state not found: $State" }
+    $Arguments += @('-statefile', "`"$($StateFile.FullName)`"")
 }
 
 $Started = Start-Process -FilePath $Exe -ArgumentList $Arguments -PassThru

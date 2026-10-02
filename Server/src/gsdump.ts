@@ -74,3 +74,31 @@ export function walkGsDump(file: string): DumpWalk {
   if (walk.vsyncs === 0) return stop('no vsync packet: the dump holds no finished frame');
   return { complete: true, packets: walk.packets, transfers: walk.transfers, vsyncs: walk.vsyncs, bytes: walk.bytes };
 }
+
+export type DumpPacket =
+  | { type: 'transfer'; path: number; data: Buffer }
+  | { type: 'vsync'; field: number }
+  | { type: 'readfifo' }
+  | { type: 'registers' };
+
+/** The packets of a dump that walkGsDump found complete, in file order. */
+export function* dumpPackets(data: Buffer): Generator<DumpPacket> {
+  let offset = 8 + data.readUInt32LE(4) + data.readUInt32LE(12) + REGISTERS;
+  while (offset < data.length) {
+    const type = data[offset];
+    if (type === 0) {
+      const size = data.readUInt32LE(offset + 2);
+      yield { type: 'transfer', path: data[offset + 1], data: data.subarray(offset + 6, offset + 6 + size) };
+      offset += 6 + size;
+    } else if (type === 1) {
+      yield { type: 'vsync', field: data[offset + 1] };
+      offset += 2;
+    } else if (type === 2) {
+      yield { type: 'readfifo' };
+      offset += 5;
+    } else {
+      yield { type: 'registers' };
+      offset += 1 + REGISTERS;
+    }
+  }
+}

@@ -16,6 +16,7 @@ import * as fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { pressPad, takeSnapshot, takeGsDump } from './navigation.js';
 import { launchAndWait, reusingProbe, kill, systemHost } from './lifecycle.js';
+import { parseGsDump, formatSummary } from './gs/parse.js';
 import { findConfig, loadCatalog, resolveLaunch, registerState, describeStates, Catalog } from './catalog.js';
 
 // ===== State =====
@@ -708,6 +709,22 @@ server.tool('watson_load_state_file', 'Load the emulator state from a file.', { 
       await requireDebug().loadStateFile(file);
       return text(`loaded ${file}; frame ${(await requireDebug().getStatus()).frame}`);
     } catch (e: any) { return failure(e); }
+  }
+);
+
+// ==========================================================
+//  GS dumps, offline
+// ==========================================================
+server.tool('watson_gsdump_parse',
+  'Parse a GS dump (.gs) offline into JSON Lines: every draw with its primitive, vertices and register state, every upload and VRAM copy, per frame. Returns a summary: draws per frame, blend equations, frame targets, textures, tests. Needs no running emulator.',
+  { path: z.string().describe('Absolute path of an uncompressed .gs dump'), out: z.string().optional().describe('Where to write the JSON Lines; default is the dump path with .jsonl') },
+  async ({ path: file, out }) => {
+    try {
+      const target = out ?? file.replace(/\.gs$/i, '') + '.jsonl';
+      return text(formatSummary(parseGsDump(file, target), file, target));
+    } catch (e: any) {
+      return { content: [{ type: 'text' as const, text: `build: unknown\nverdict: NOT VERIFIED ${e.message}` }], isError: true };
+    }
   }
 );
 

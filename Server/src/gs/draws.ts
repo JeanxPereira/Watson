@@ -66,6 +66,11 @@ export class DrawAssembler {
     this.frame += 1;
   }
 
+  /** Index of the draw being built, or -1; lets a reader place draws among other events. */
+  openIndex(): number {
+    return this.open ? this.open.index : -1;
+  }
+
   take(): Draw[] {
     const out = this.closed;
     this.closed = [];

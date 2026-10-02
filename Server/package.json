@@ -5,7 +5,8 @@
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "watson": "dist/index.js"
+    "watson": "dist/index.js",
+    "watson-gsdump": "dist/cli.js"
   },
   "scripts": {
     "build": "tsc",

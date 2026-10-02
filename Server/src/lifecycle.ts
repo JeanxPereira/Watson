@@ -32,6 +32,41 @@ export async function launch(host: Host, root: string, options: LaunchOptions): 
   return pid;
 }
 
+export interface Probe { (): Promise<{ alive: boolean; frame: number }>; }
+export interface WaitOptions { timeoutMs: number; intervalMs: number; logTail: () => string; }
+
+/**
+ * Launch, then wait until the DebugServer answers, and until a VM is alive when something was
+ * asked to boot. An emulator that never becomes usable is killed here: left running it would
+ * hold the debug port, and the next launch would start a second one that kill cannot reach.
+ */
+export async function launchAndWait(host: Host, root: string, options: LaunchOptions, probe: Probe, wait: WaitOptions): Promise<{ pid: number; alive: boolean; frame: number }> {
+  const pid = await launch(host, root, options);
+  const expectVm = Boolean(options.bios || options.elf || options.state);
+  const deadline = Date.now() + wait.timeoutMs;
+  const log = () => { const tail = wait.logTail().trim(); return tail ? `\nPCSX2 log:\n${tail}` : ''; };
+  let last = 'never tried';
+
+  while (Date.now() < deadline) {
+    if ((await host.processPath(pid)) === null) {
+      fs.rmSync(pidFile(root), { force: true });
+      throw new Error(`pid ${pid} exited before the DebugServer answered (last: ${last})${log()}`);
+    }
+    try {
+      const status = await probe();
+      if (!expectVm || status.alive) return { pid, alive: status.alive, frame: status.frame };
+      last = 'the DebugServer answers but the VM has not booted yet';
+    } catch (error: any) {
+      last = error.message;
+    }
+    await new Promise((resolve) => setTimeout(resolve, wait.intervalMs));
+  }
+
+  await host.terminate(pid);
+  fs.rmSync(pidFile(root), { force: true });
+  throw new Error(`pid ${pid} never became usable within ${wait.timeoutMs} ms and was terminated (last: ${last})${log()}`);
+}
+
 export async function kill(host: Host, root: string): Promise<string> {
   if (!fs.existsSync(pidFile(root))) throw new Error('no Watson emulator was launched from this checkout');
   const pid = Number(fs.readFileSync(pidFile(root), 'utf8').trim());

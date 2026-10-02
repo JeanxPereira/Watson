@@ -15,7 +15,7 @@ import * as path from 'node:path';
 import * as fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { pressPad, takeSnapshot, takeGsDump } from './navigation.js';
-import { launch, kill, systemHost } from './lifecycle.js';
+import { launchAndWait, kill, systemHost } from './lifecycle.js';
 import { findConfig, loadCatalog, resolveLaunch, registerState, describeStates, Catalog } from './catalog.js';
 
 // ===== State =====
@@ -57,6 +57,15 @@ function configFile(): string | null {
   const flag = process.argv.indexOf('--config');
   const explicit = flag >= 0 ? process.argv[flag + 1] : process.env.WATSON_CONFIG;
   return findConfig(process.cwd(), explicit);
+}
+
+function emulatorLogTail(): string {
+  try {
+    const lines = fs.readFileSync(path.join(WATSON_ROOT, 'Runtime', 'PCSX2', 'logs', 'emulog.txt'), 'utf8').trimEnd().split(/\r?\n/);
+    return lines.slice(-15).join('\n');
+  } catch {
+    return '';
+  }
 }
 
 function catalog(): Catalog | null {
@@ -580,21 +589,26 @@ server.tool('watson_launch',
     try {
       const { bios, elf, state } = resolveLaunch(catalog(), request);
       if (state && !fs.existsSync(state)) throw new Error(`state file not found: ${state}`);
-      const pid = await launch(systemHost, WATSON_ROOT, { bios, elf, state });
-      const deadline = Date.now() + 60000;
-      let last = 'never tried';
-      while (Date.now() < deadline) {
+      let connected: DebugServerClient | null = null;
+      const probe = async () => {
+        const client = new DebugServerClient('127.0.0.1', 21512);
         try {
-          const client = new DebugServerClient('127.0.0.1', 21512);
           await client.connect();
-          const st = await client.getStatus();
-          if ((bios || elf) && !st.alive) { client.disconnect(); throw new Error('the VM has not booted yet'); }
-          debugServer?.disconnect();
-          debugServer = client;
-          return text(`launched pid ${pid}; connected; alive=${st.alive} frame=${st.frame}`);
-        } catch (e: any) { last = e.message; await new Promise((r) => setTimeout(r, 500)); }
-      }
-      throw new Error(`pid ${pid} started but no usable DebugServer within 60 s: ${last}`);
+          const status = await client.getStatus();
+          connected?.disconnect();
+          connected = client;
+          return status;
+        } catch (error) {
+          client.disconnect();
+          throw error;
+        }
+      };
+      debugServer?.disconnect();
+      debugServer = null;
+      const started = await launchAndWait(systemHost, WATSON_ROOT, { bios, elf, state }, probe,
+        { timeoutMs: 60000, intervalMs: 500, logTail: emulatorLogTail });
+      debugServer = connected;
+      return text(`launched pid ${started.pid}; connected; alive=${started.alive} frame=${started.frame}`);
     } catch (e: any) { return failure(e); }
   }
 );

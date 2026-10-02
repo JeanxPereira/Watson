@@ -55,6 +55,7 @@ typedef int socket_t;
 #include "SIO/Pad/Pad.h"
 #include "SIO/Pad/PadDualshock2.h"
 #include "common/Error.h"
+#include "common/FileSystem.h"
 
 #include <cstring>
 #include <cstdio>
@@ -316,27 +317,50 @@ namespace DebugServer
 	// Runs fn on the CPU thread and waits for it. The CPU thread owns the recompiler and the
 	// breakpoint tables; touching them from the socket thread races it. The wait is bounded and
 	// watches s_running so a client thread can never keep Stop() from joining it.
-	static bool runOnCpuThread(std::function<void()> fn, int timeoutMs = 5000)
+	//
+	// A call that is given up on is cancelled: the queued function checks the flag first and
+	// does nothing, so a command reported as failed cannot take effect later, and nothing runs
+	// after the emulator has torn its memory down. A call already executing cannot be cancelled;
+	// that case is reported as still running.
+	enum class CpuRun { Done, Cancelled, StillRunning };
+
+	static CpuRun runOnCpuThread(std::function<void()> fn, int timeoutMs = 5000)
 	{
-		auto done = std::make_shared<std::promise<void>>();
-		std::future<void> finished = done->get_future();
-		Host::RunOnCPUThread([fn = std::move(fn), done]() {
-			fn();
-			done->set_value();
+		struct Call
+		{
+			std::promise<void> done;
+			std::atomic<bool> abandoned{false};
+			std::atomic<bool> started{false};
+		};
+		auto call = std::make_shared<Call>();
+		std::future<void> finished = call->done.get_future();
+		Host::RunOnCPUThread([fn = std::move(fn), call]() {
+			call->started.store(true);
+			if (!call->abandoned.load())
+				fn();
+			call->done.set_value();
 		});
-		for (int waited = 0; waited < timeoutMs; waited += 20)
+		const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+		while (std::chrono::steady_clock::now() < deadline && s_running.load())
 		{
 			if (finished.wait_for(std::chrono::milliseconds(20)) == std::future_status::ready)
-				return true;
-			if (!s_running.load())
-				return false;
+				return CpuRun::Done;
 		}
-		return false;
+		call->abandoned.store(true);
+		return call->started.load() ? CpuRun::StillRunning : CpuRun::Cancelled;
+	}
+
+	static std::string cpuRunFailure(CpuRun run, const std::string& what)
+	{
+		return run == CpuRun::StillRunning
+			? "the CPU thread is still running " + what + "; it may yet take effect"
+			: "the CPU thread did not run " + what + " in time; it was cancelled";
 	}
 
 	static bool waitUntilPaused(DebugInterface* cpu, int timeoutMs)
 	{
-		for (int waited = 0; waited < timeoutMs; waited += 1)
+		const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+		while (std::chrono::steady_clock::now() < deadline)
 		{
 			if (cpu->isCpuPaused())
 				return true;
@@ -921,9 +945,12 @@ namespace DebugServer
 		else if (cmd == "load_state_file")
 		{
 			const std::string path = wirePath(params, "path");
+			if (!FileSystem::FileExists(path.c_str()))
+				return errorReply("no state file at " + path);
+			// PCSX2 resets the VM whenever a load fails part-way: the position is lost.
 			Error error;
 			if (!VMManager::LoadState(path.c_str(), &error))
-				return errorReply("load state failed: " + error.GetDescription());
+				return errorReply("load state failed and PCSX2 reset the VM: " + error.GetDescription());
 			j.startObject();
 			j.kv("ok", true);
 			j.endObject();
@@ -962,7 +989,7 @@ namespace DebugServer
 	static std::string handleStep(const std::string& cpuName, DebugInterface* cpu, bool over)
 	{
 		auto oldPc = std::make_shared<u32>(0);
-		const bool armed = runOnCpuThread([cpuName, cpu, over, oldPc]() {
+		const CpuRun armed = runOnCpuThread([cpuName, cpu, over, oldPc]() {
 			const u32 pc = cpu->getPC();
 			*oldPc = pc;
 			CBreakPoints::SetSkipFirst(getBpCpu(cpuName), pc);
@@ -978,13 +1005,13 @@ namespace DebugServer
 			CBreakPoints::AddBreakPoint(getBpCpu(cpuName), target, true, true, true);
 			cpu->resumeCpu();
 		});
-		if (!armed)
-			return errorReply("the CPU thread did not accept the step");
+		if (armed != CpuRun::Done)
+			return errorReply(cpuRunFailure(armed, "the step"));
 
 		const bool stopped = waitUntilPaused(cpu, over ? 10000 : 5000);
 
 		auto reply = std::make_shared<std::string>();
-		const bool read = runOnCpuThread([cpu, oldPc, stopped, reply]() {
+		const CpuRun read = runOnCpuThread([cpu, oldPc, stopped, reply]() {
 			const u32 newPc = cpu->getPC();
 			bool valid = true;
 			JsonBuilder j;
@@ -1000,7 +1027,7 @@ namespace DebugServer
 			j.endObject();
 			*reply = j.str();
 		});
-		return read ? *reply : errorReply("the CPU thread did not report the step result");
+		return read == CpuRun::Done ? *reply : errorReply(cpuRunFailure(read, "the step result"));
 	}
 
 	static std::string handleFrameAdvance(DebugInterface* cpu, int64_t frames)
@@ -1009,21 +1036,41 @@ namespace DebugServer
 			return errorReply("frames must be between 1 and 3600");
 
 		const u32 count = (u32)frames;
-		if (!runOnCpuThread([count]() { VMManager::FrameAdvance(count); }))
-			return errorReply("the CPU thread did not accept frame_advance");
+		auto first = std::make_shared<u32>(0);
+		const CpuRun armed = runOnCpuThread([count, first]() {
+			*first = g_FrameCount;
+			VMManager::FrameAdvance(count);
+		});
+		if (armed != CpuRun::Done)
+			return errorReply(cpuRunFailure(armed, "frame_advance"));
 
 		// FrameAdvance switched the VM to Running on the CPU thread; it pauses itself after the
 		// last frame. Allow real time for slow frames.
-		for (int waited = 0; waited < 2000 + (int)count * 100; waited += 2)
+		const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000 + (int)count * 100);
+		while (std::chrono::steady_clock::now() < deadline)
 		{
 			if (!s_running.load())
 				return errorReply("the server is stopping");
+			if (!VMManager::HasValidVM())
+				return errorReply("the VM stopped during frame_advance");
 			if (VMManager::GetState() == VMState::Paused)
 				break;
 			std::this_thread::sleep_for(std::chrono::milliseconds(2));
 		}
 		if (VMManager::GetState() != VMState::Paused)
 			return errorReply("the VM did not pause after frame_advance");
+
+		// A breakpoint or a watchpoint also pauses the VM. PCSX2 keeps the frames that were not
+		// run armed, so the next resume pauses again after them; the caller has to know.
+		const u32 ran = g_FrameCount - *first;
+		if (ran < count)
+		{
+			char pc[16];
+			snprintf(pc, sizeof(pc), "0x%08x", cpu->getPC());
+			return errorReply("stopped after " + std::to_string(ran) + " of " + std::to_string(count) +
+				" frames at pc " + pc + ", by a breakpoint or watchpoint; " + std::to_string(count - ran) +
+				" frames remain armed and the next resume will pause after them");
+		}
 
 		JsonBuilder j;
 		j.startObject();
@@ -1054,9 +1101,15 @@ namespace DebugServer
 		if (cmd == "frame_advance")
 			return handleFrameAdvance(cpu, getNum(params, "frames", 1));
 
+		// The VM can stop between the check above and the moment the CPU thread gets to this
+		// command, so the CPU thread checks again before touching anything.
 		auto reply = std::make_shared<std::string>();
-		const bool ran = runOnCpuThread([jsonLine, reply]() { *reply = handleOnCpuThread(jsonLine); });
-		return ran ? *reply : errorReply("the CPU thread did not run " + cmd + " in time");
+		const CpuRun ran = runOnCpuThread([jsonLine, cmd, reply]() {
+			*reply = VMManager::HasValidVM()
+				? handleOnCpuThread(jsonLine)
+				: errorReply("no VM is running; boot one before sending " + cmd);
+		});
+		return ran == CpuRun::Done ? *reply : errorReply(cpuRunFailure(ran, cmd));
 	}
 
 	static std::thread s_serverThread;
@@ -1096,6 +1149,17 @@ namespace DebugServer
 
 				send(clientSock, response.c_str(), (int)response.size(), 0);
 			}
+		}
+
+		// A client that dropped mid-press would leave its buttons held for whoever comes next.
+		if (s_running.load())
+		{
+			runOnCpuThread([]() {
+				if (!VMManager::HasValidVM())
+					return;
+				for (const PadButton& button : s_padButtons)
+					Pad::SetControllerState(0, button.bind, 0.0f);
+			}, 1000);
 		}
 
 		if (s_clientSocket.exchange(SOCKET_INVALID) == clientSock)
@@ -1166,10 +1230,26 @@ namespace DebugServer
 			socket_t clientSock = accept(s_listenSocket, nullptr, nullptr);
 			if (clientSock == SOCKET_INVALID) continue;
 
+			// The previous client's thread frees the slot a moment after its socket closes;
+			// give it that moment before deciding the slot is taken.
+			for (int waited = 0; waited < 1500 && s_clientActive.load() && s_running.load(); waited += 5)
+				std::this_thread::sleep_for(std::chrono::milliseconds(5));
+
 			if (s_clientActive.load())
 			{
+				// Half-close and drain so the refusal is delivered even when the client has
+				// already sent its first command; a plain close would reset the connection.
 				const std::string refusal = errorReply("another client is connected") + "\n";
 				send(clientSock, refusal.c_str(), (int)refusal.size(), 0);
+#ifdef _WIN32
+				shutdown(clientSock, SD_SEND);
+				DWORD drainTimeout = 200;
+				setsockopt(clientSock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&drainTimeout, sizeof(drainTimeout));
+#else
+				shutdown(clientSock, SHUT_WR);
+#endif
+				char drain[256];
+				recv(clientSock, drain, sizeof(drain), 0);
 				CLOSE_SOCKET(clientSock);
 				continue;
 			}

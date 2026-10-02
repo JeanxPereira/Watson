@@ -197,3 +197,76 @@ test('live: from one saved state, the same frames give the same snapshot bytes',
     client.disconnect();
   }
 });
+
+test('live: a GS dump is complete on disk when returned and does not grow afterwards', async (t) => {
+  if (!(await listening())) return t.skip(`nothing listening on 127.0.0.1:${PORT}; start Emulator/Run.ps1`);
+  if (!EXPECT_VM) return t.skip('needs a running VM');
+  const os = await import('node:os');
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const { takeGsDump } = await import('../dist/navigation.js');
+  const { walkGsDump } = await import('../dist/gsdump.js');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'watson-'));
+  const client = new DebugServerClient('127.0.0.1', PORT);
+  await client.connect();
+  try {
+    await client.pause();
+    for (const frames of [1, 2]) {
+      const { dump } = await takeGsDump(client, path.join(dir, `d${frames}.png`), frames);
+      const walk = walkGsDump(dump);
+      assert.equal(walk.complete, true, `${frames}-frame dump: ${walk.reason}`);
+      assert.ok(walk.vsyncs >= frames, `${frames}-frame dump holds ${walk.vsyncs} vsyncs`);
+      await client.frameAdvance(10);
+      assert.equal(fs.statSync(dump).size, walk.bytes, 'the dump grew after it was returned');
+    }
+  } finally {
+    await client.resume();
+    client.disconnect();
+  }
+});
+
+test('live: frame_advance stopped by a breakpoint reports how far it got', async (t) => {
+  if (!(await listening())) return t.skip(`nothing listening on 127.0.0.1:${PORT}; start Emulator/Run.ps1`);
+  if (!EXPECT_VM) return t.skip('needs a running VM');
+  const client = new DebugServerClient('127.0.0.1', PORT);
+  await client.connect();
+  try {
+    await client.pause();
+    // The EE kernel idle loop on ROM 2.30: reached within the first frame of any advance.
+    await client.setBreakpoint('0x00081fc0');
+    await assert.rejects(client.frameAdvance(30), /stopped after \d+ of 30 frames/);
+  } finally {
+    await client.clearAllBreakpoints();
+    await client.resume();
+    client.disconnect();
+  }
+});
+
+test('live: loading a state file that does not exist is refused without resetting the VM', async (t) => {
+  if (!(await listening())) return t.skip(`nothing listening on 127.0.0.1:${PORT}; start Emulator/Run.ps1`);
+  if (!EXPECT_VM) return t.skip('needs a running VM');
+  const client = new DebugServerClient('127.0.0.1', PORT);
+  await client.connect();
+  try {
+    await client.pause();
+    const before = (await client.getStatus()).frame;
+    await assert.rejects(client.loadStateFile('D:/does/not/exist.p2s'), /no state file at/);
+    const after = await client.getStatus();
+    assert.equal(after.alive, true);
+    assert.ok(after.frame >= before, `frame went from ${before} to ${after.frame}: the VM was reset`);
+  } finally {
+    await client.resume();
+    client.disconnect();
+  }
+});
+
+test('live: a client that disconnects can reconnect at once, many times', async (t) => {
+  if (!(await listening())) return t.skip(`nothing listening on 127.0.0.1:${PORT}; start Emulator/Run.ps1`);
+  for (let i = 0; i < 40; i++) {
+    const client = new DebugServerClient('127.0.0.1', PORT);
+    await client.connect();
+    const st = await client.getStatus();
+    assert.equal(typeof st.alive, 'boolean', `attempt ${i}`);
+    client.disconnect();
+  }
+});

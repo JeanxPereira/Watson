@@ -40,8 +40,19 @@ with no pad input: checked after a full kill and relaunch.
 
 ## Ground truth captured
 
-`Runtime/captures/rom-0230A-clock.gs` (one frame, uncompressed, 5 791 744 bytes) and
-`rom-0230A-clock.png` beside it, from frame 2478.
+`Runtime/captures/rom-0230A-clock.gs` and `rom-0230A-clock.png` beside it, captured after
+loading `rom-0230A-clock.p2s` (frame 2492) with `watson_gs_dump` asking for one frame.
+
+| | |
+|---|---|
+| Size | 6 154 684 bytes, uncompressed |
+| SHA-256 | `9176fdbb6bb5d394505e984462cbf7d8b11148c804d7b54dfc114ef758c97174` |
+| Packets | 2 716, of which 2 708 transfers |
+| Frames | 4 vsyncs: the one asked for, plus those PCSX2 records before it closes a dump |
+| Complete | walked packet by packet to the exact end of the file; size unchanged after 10 more frames |
+
+An earlier capture of this file was cut inside its last packet: the tool returned it while
+PCSX2 still held it open. It was replaced; nothing was parsed from it.
 
 ## What the screen holds, from the snapshot alone
 

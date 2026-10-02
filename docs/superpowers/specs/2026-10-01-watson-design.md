@@ -307,6 +307,12 @@ has not been built against the pinned tag. PCSX2 itself was built on this machin
 
 Each phase gets its own implementation plan.
 
+Order as executed: phase 0, then phase 2 (plan `2026-10-01-watson-navigation.md`), then
+phase 1. Navigation moved ahead so that the dump phase 1 needs is captured by the agent
+rather than by hand. That plan leaves out `watson_run_until` and `watson_gs_regs`: navigation
+does not need the first, and the GS privileged registers are already category 6 of
+`watson_read_registers`.
+
 ## 11. Open questions resolved by phase 0 and 1, not by assumption
 
 - Whether `hddosd.elf` boots to the clock under `-elf` in PCSX2. If it does not, the HDD OSD

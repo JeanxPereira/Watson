@@ -705,12 +705,13 @@ server.tool('watson_gif_trace',
       pc: z.string().describe('Program counter, hex. The probe fires before the instruction there executes.'),
       ranges: z.array(z.string()).default([]).describe('Memory to record, each `[*]base[+hex]:hexlength`: base is a register name (a0, sp, ...) or a hex address; `*` follows the 32-bit pointer found there. Example: "a0:0x160", "*a1+0x60:0x40". Up to 8, 0x4000 bytes each.'),
     })).max(32).default([]).describe('Record the EE registers and these memory ranges into the trace every time execution reaches a program counter: the real inputs of a function, in order with the packets it sends'),
+    hold: z.array(z.string()).default([]).describe('Pad buttons held on port 1 through the traced frames, pressed after the trace is armed and released before it stops: records what a press sets off from its first frame'),
   },
-  async ({ frames, path: given, probes }) => {
+  async ({ frames, path: given, probes, hold }) => {
     try {
       const client = requireDebug();
       const frame = (await client.getStatus()).frame;
-      const files = await takeGifTrace(client, capturePath(given, `trace-${frame}`), frames, probes);
+      const files = await takeGifTrace(client, capturePath(given, `trace-${frame}`), frames, probes, hold);
       const trace = readTrace(files.trace);
       if (!trace.complete) {
         return { content: [{ type: 'text' as const, text: `trace: ${files.trace}\nbuild: unknown\nverdict: NOT VERIFIED ${trace.reason}  coverage 0/?` }], isError: true };

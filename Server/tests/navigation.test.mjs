@@ -189,3 +189,25 @@ test('takeGifTrace hands its probes to the trace', async () => {
   await takeGifTrace(emulator, png, 1, probes);
   assert.deepEqual(given, probes);
 });
+
+test('takeGifTrace holds the buttons from the first traced frame and lets go before it stops', async () => {
+  const emulator = tracer(completeDump);
+  const png = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'watson-trace-')), 'shot.png');
+  await takeGifTrace(emulator, png, 1, [], ['up']);
+  assert.deepEqual(emulator.calls.slice(0, 4), [['pause'], ['gifTraceStart', 'shot.trace.jsonl'], ['padSet', 'up', 1], ['queueSnapshot', 'shot.png', 1]]);
+  assert.deepEqual(emulator.calls.slice(-2), [['padSet', 'up', 0], ['gifTraceStop']]);
+});
+
+test('takeGifTrace lets go of the buttons when the dump fails', async () => {
+  const emulator = tracer(() => {});
+  const png = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'watson-trace-')), 'shot.png');
+  await assert.rejects(takeGifTrace(emulator, png, 1, [], ['up']), /is not complete/);
+  assert.deepEqual(emulator.calls.filter((call) => call[0] === 'padSet'), [['padSet', 'up', 1], ['padSet', 'up', 0]]);
+});
+
+test('takeGifTrace touches no button when none is asked for', async () => {
+  const emulator = tracer(completeDump);
+  const png = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'watson-trace-')), 'shot.png');
+  await takeGifTrace(emulator, png, 1);
+  assert.equal(emulator.calls.filter((call) => call[0] === 'padSet').length, 0);
+});

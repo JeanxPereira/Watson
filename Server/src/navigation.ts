@@ -107,19 +107,23 @@ export interface Tracer extends Emulator {
  * between the two requests and the dump would begin one vsync late. The trace is stopped only
  * after the dump is closed, so it covers every packet the dump holds.
  */
-export async function takeGifTrace(emulator: Tracer, path: string, frames: number, probes: ProbeSpec[] = []): Promise<{ png: string; dump: string; trace: string }> {
+export async function takeGifTrace(emulator: Tracer, path: string, frames: number, probes: ProbeSpec[] = [], hold: string[] = []): Promise<{ png: string; dump: string; trace: string }> {
   const trace = path.replace(/\.png$/i, '.trace.jsonl');
   fs.rmSync(trace, { force: true });
   await emulator.pause();
   await emulator.gifTraceStart(trace, probes);
   let files: { png: string; dump: string };
   try {
+    // Held from the first traced frame, so what the press sets off is recorded from its start.
+    if (hold.length) await emulator.padSet(hold, 1);
     files = await takeGsDump(emulator, path, frames);
   } catch (error) {
     // The reason the dump failed is the one worth reporting.
+    if (hold.length) await emulator.padSet(hold, 0).catch(() => undefined);
     await emulator.gifTraceStop().catch(() => undefined);
     throw error;
   }
+  if (hold.length) await emulator.padSet(hold, 0);
   await emulator.gifTraceStop();
   return { ...files, trace };
 }

@@ -238,7 +238,16 @@ Unchanged from the inherited DebugServer: newline-delimited JSON over TCP on
 `load_state_file`. Commands that finish later (`frame_advance`, `gs_dump`, a trace) reply once
 when done; the server applies a timeout and reports `NOT VERIFIED` when it expires.
 
-The DebugServer listens on loopback only and accepts one client.
+The DebugServer listens on loopback only, and its port is exclusive: a second emulator
+cannot listen on it.
+
+Two properties this design needs are not true of the inherited server and are owed by the
+first task of phase 2, before any new command is added:
+
+- **One client.** The inherited server accepts any number of connections, each on its own
+  detached thread with no lock between them.
+- **Clean stop.** `Stop()` closes the listening socket but neither wakes nor joins client
+  threads; a command in flight at shutdown can outlive the emulator's memory.
 
 ## 8. Error handling
 
@@ -248,8 +257,16 @@ The DebugServer listens on loopback only and accepts one client.
   process it started and reports the last lines of the PCSX2 log.
 - A tool that writes a file returns the path only after the file is closed and its size is
   stable.
-- The patch never blocks the emulation thread on a socket; commands are queued and executed
-  at a safe point, as the inherited code already does for breakpoints.
+- The patch never blocks the emulation thread on a socket. Commands that change emulator
+  state run on the CPU thread through `Host::RunOnCPUThread`, as upstream's own debugger
+  does. The inherited server does not do this: it calls `CBreakPoints` from its socket
+  thread, and `CBreakPoints::Update` resets the recompiler while the CPU thread may be
+  inside it. Phase 0 keeps that behavior; moving every mutating command to the CPU thread
+  is the first task of phase 2, together with the two items in section 7.
+- A command other than `status` that arrives before any VM has booted is refused with
+  `no VM is running`.
+- A watchpoint with action `log` is refused. PCSX2 removed the log-only result, and a
+  memcheck with no break bit never counts a hit.
 
 ## 9. Testing
 

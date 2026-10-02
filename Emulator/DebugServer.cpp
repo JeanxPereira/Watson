@@ -304,6 +304,17 @@ namespace DebugServer
 
 		JsonBuilder j;
 
+		// Before the first VM boots the virtual memory map is unset: a read or a disassembly
+		// would follow a guest address as a host pointer. Only status is answerable then.
+		if (cmd != "status" && !cpu->isAlive())
+		{
+			j.startObject();
+			j.kv("ok", false);
+			j.kv("error", std::string("no VM is running; boot one before sending ") + cmd);
+			j.endObject();
+			return j.str();
+		}
+
 		// ----- STATUS -----
 		if (cmd == "status")
 		{
@@ -539,9 +550,20 @@ namespace DebugServer
 			else if (typeStr == "readwrite" || typeStr == "access") cond = MEMCHECK_READWRITE;
 			else if (typeStr == "onchange") cond = (MemCheckCondition)(MEMCHECK_WRITE | MEMCHECK_WRITE_ONCHANGE);
 
+			// PCSX2 removed MEMCHECK_LOG. A memcheck whose result has no break bit is skipped by
+			// both the recompiler and the interpreter and never counts a hit, so accepting "log"
+			// would report a watchpoint that can only ever show zero hits.
+			if (actionStr == "log")
+			{
+				j.startObject();
+				j.kv("ok", false);
+				j.kv("error", std::string("log watchpoints are not supported by this PCSX2; use action break"));
+				j.endObject();
+				return j.str();
+			}
+
 			MemCheckResult result = MEMCHECK_BREAK;
-			if (actionStr == "log") result = MEMCHECK_IGNORE;
-			else if (actionStr == "both") result = MEMCHECK_BOTH;
+			if (actionStr == "both") result = MEMCHECK_BOTH;
 
 			auto bpCpu = getBpCpu(cpuName);
 			CBreakPoints::AddMemCheck(bpCpu, start, end, cond, result);
@@ -921,8 +943,14 @@ namespace DebugServer
 			return;
 		}
 
+		// On Windows SO_REUSEADDR lets a second process listen on the same port, and clients
+		// then reach either one. The port must belong to exactly one emulator.
 		int opt = 1;
+#ifdef _WIN32
+		setsockopt(s_listenSocket, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, (const char*)&opt, sizeof(opt));
+#else
 		setsockopt(s_listenSocket, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
+#endif
 
 		struct sockaddr_in addr = {};
 		addr.sin_family = AF_INET;

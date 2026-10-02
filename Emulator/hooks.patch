@@ -1,3 +1,32 @@
+diff --git a/pcsx2-qt/QtHost.cpp b/pcsx2-qt/QtHost.cpp
+index a177f39..8758bf9 100644
+--- a/pcsx2-qt/QtHost.cpp
++++ b/pcsx2-qt/QtHost.cpp
+@@ -18,6 +18,7 @@
+ #include "pcsx2/CDVD/CDVD.h"
+ #include "pcsx2/Counters.h"
+ #include "pcsx2/DebugTools/Debug.h"
++#include "pcsx2/DebugTools/DebugServer.h"
+ #include "pcsx2/GS.h"
+ #include "pcsx2/GS/GS.h"
+ #include "pcsx2/GSDumpReplayer.h"
+@@ -384,6 +385,8 @@ void EmuThread::run()
+ 		return;
+ 	}
+ 
++	DebugServer::Start();
++
+ 	// Start background polling because the VM won't do it for us.
+ 	createBackgroundControllerPollTimer();
+ 	startBackgroundControllerPollTimer();
+@@ -423,6 +426,7 @@ void EmuThread::run()
+ 	// Teardown in reverse order.
+ 	stopBackgroundControllerPollTimer();
+ 	destroyBackgroundControllerPollTimer();
++	DebugServer::Stop();
+ 	VMManager::Internal::CPUThreadShutdown();
+ 
+ 	// Move back to the UI thread, since we're no longer running.
 diff --git a/pcsx2/CMakeLists.txt b/pcsx2/CMakeLists.txt
 index 4c8ce81..9a2b1cf 100644
 --- a/pcsx2/CMakeLists.txt
@@ -18,33 +47,3 @@ index 4c8ce81..9a2b1cf 100644
  	DebugTools/BiosDebugData.h)
  
  set(pcsx2HostSources
-diff --git a/pcsx2/VMManager.cpp b/pcsx2/VMManager.cpp
-index 082d574..fa92749 100644
---- a/pcsx2/VMManager.cpp
-+++ b/pcsx2/VMManager.cpp
-@@ -8,6 +8,7 @@
- #include "Counters.h"
- #include "DEV9/DEV9.h"
- #include "DebugTools/DebugInterface.h"
-+#include "DebugTools/DebugServer.h"
- #include "DebugTools/SymbolImporter.h"
- #include "Elfheader.h"
- #include "FW.h"
-@@ -428,6 +429,8 @@ bool VMManager::Internal::CPUThreadInitialize()
- 
- 	ReloadPINE();
- 
-+	DebugServer::Start();
-+
- 	if (EmuConfig.EnableDiscordPresence)
- 		InitializeDiscordPresence();
- 
-@@ -442,6 +445,8 @@ void VMManager::Internal::CPUThreadShutdown()
- {
- 	ShutdownDiscordPresence();
- 
-+	DebugServer::Stop();
-+
- 	PINEServer::Deinitialize();
- 
- 	Achievements::Shutdown(false);

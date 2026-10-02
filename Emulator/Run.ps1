@@ -45,6 +45,7 @@ if (-not (Test-Path $Ini)) {
     if (-not (Test-Path $Ini)) { Fail "-testconfig (exit $($Init.ExitCode)) did not create $Ini" }
 }
 Set-IniValue $Ini 'UI' 'SetupWizardIncomplete' 'false'
+Set-IniValue $Ini 'EmuCore' 'EnablePINE' 'true'
 
 $Arguments = @('-datapath', "`"$Runtime`"")
 if ($Bios) {

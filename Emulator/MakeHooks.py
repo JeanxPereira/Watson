@@ -4,20 +4,25 @@
 Anchors are written with LF and matched on LF-normalized text; each file keeps the line
 ending it was checked out with.
 
+The server starts and stops in the Qt host, not in VMManager: pcsx2-gsrunner shares VMManager
+and must not open the debug port.
+
 python Emulator/MakeHooks.py <pcsx2 tree>
-Then, inside the tree: git diff -- pcsx2/VMManager.cpp pcsx2/CMakeLists.txt > hooks.patch
+Then, inside the tree: git diff -- pcsx2-qt/QtHost.cpp pcsx2/CMakeLists.txt > hooks.patch
 """
 import sys
 from pathlib import Path
 
 EDITS = {
-    "pcsx2/VMManager.cpp": [
-        ('#include "DebugTools/SymbolImporter.h"\n',
-         '#include "DebugTools/DebugServer.h"\n#include "DebugTools/SymbolImporter.h"\n'),
-        ('\tReloadPINE();\n\n\tif (EmuConfig.EnableDiscordPresence)\n',
-         '\tReloadPINE();\n\n\tDebugServer::Start();\n\n\tif (EmuConfig.EnableDiscordPresence)\n'),
-        ('\tShutdownDiscordPresence();\n\n\tPINEServer::Deinitialize();\n',
-         '\tShutdownDiscordPresence();\n\n\tDebugServer::Stop();\n\n\tPINEServer::Deinitialize();\n'),
+    "pcsx2-qt/QtHost.cpp": [
+        ('#include "pcsx2/DebugTools/Debug.h"\n',
+         '#include "pcsx2/DebugTools/Debug.h"\n#include "pcsx2/DebugTools/DebugServer.h"\n'),
+        ('\t\treturn;\n\t}\n\n\t// Start background polling because the VM won\'t do it for us.\n',
+         '\t\treturn;\n\t}\n\n\tDebugServer::Start();\n\n'
+         '\t// Start background polling because the VM won\'t do it for us.\n'),
+        ('\tdestroyBackgroundControllerPollTimer();\n\tVMManager::Internal::CPUThreadShutdown();\n',
+         '\tdestroyBackgroundControllerPollTimer();\n\tDebugServer::Stop();\n'
+         '\tVMManager::Internal::CPUThreadShutdown();\n'),
     ],
     "pcsx2/CMakeLists.txt": [
         ('\tDebugTools/BiosDebugData.cpp)\n',

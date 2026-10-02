@@ -12,11 +12,11 @@ function fakeServer(onLine) {
       let buf = '';
       socket.on('data', (d) => {
         buf += d;
-        const i = buf.indexOf('\n');
-        if (i < 0) return;
-        const line = buf.slice(0, i);
-        buf = buf.slice(i + 1);
-        onLine(JSON.parse(line), socket);
+        for (let i = buf.indexOf('\n'); i >= 0; i = buf.indexOf('\n')) {
+          const line = buf.slice(0, i);
+          buf = buf.slice(i + 1);
+          onLine(JSON.parse(line), socket);
+        }
       });
       socket.on('error', () => {});
     });
@@ -60,6 +60,27 @@ test('a socket closed with a request pending rejects promptly', async () => {
     assert.ok(Date.now() - started < 2000, 'must not wait for the 10 s command timeout');
     assert.equal(client.isConnected(), false);
   } finally {
+    server.close();
+  }
+});
+
+test('two concurrent requests each get their own reply', async () => {
+  let count = 0;
+  const server = await fakeServer((_req, socket) => {
+    count += 1;
+    const id = count;
+    const reply = JSON.stringify({ ok: true, data: { alive: true, paused: false, pc: '0x0', cycles: id } });
+    setTimeout(() => socket.write(reply + String.fromCharCode(10)), id === 1 ? 60 : 5);
+  });
+  const client = new DebugServerClient('127.0.0.1', server.address().port);
+  await client.connect();
+  const unsettled = new Promise((_, reject) => setTimeout(() => reject(new Error('a request never settled')), 2000));
+  try {
+    const [first, second] = await Promise.race([Promise.all([client.getStatus(), client.getStatus()]), unsettled]);
+    assert.equal(first.cycles, 1);
+    assert.equal(second.cycles, 2);
+  } finally {
+    client.disconnect();
     server.close();
   }
 });

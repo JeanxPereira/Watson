@@ -88,6 +88,7 @@ export class DebugServerClient {
   private responseBuffer = '';
   private pendingResolve: ((data: any) => void) | null = null;
   private pendingReject: ((err: Error) => void) | null = null;
+  private queue: Promise<unknown> = Promise.resolve();
 
   constructor(host = '127.0.0.1', port = 21512) {
     this.host = host;
@@ -140,44 +141,51 @@ export class DebugServerClient {
   }
 
   private processBuffer(): void {
-    const newlineIdx = this.responseBuffer.indexOf('\n');
-    if (newlineIdx < 0) return;
+    for (let newlineIdx = this.responseBuffer.indexOf('\n'); newlineIdx >= 0; newlineIdx = this.responseBuffer.indexOf('\n')) {
+      const line = this.responseBuffer.substring(0, newlineIdx);
+      this.responseBuffer = this.responseBuffer.substring(newlineIdx + 1);
 
-    const line = this.responseBuffer.substring(0, newlineIdx);
-    this.responseBuffer = this.responseBuffer.substring(newlineIdx + 1);
-
-    if (this.pendingResolve) {
-      try {
-        const data = JSON.parse(line);
-        this.pendingResolve(data);
-      } catch (e) {
-        if (this.pendingReject) this.pendingReject(new Error(`Invalid JSON: ${line}`));
-      }
+      const resolve = this.pendingResolve;
+      const reject = this.pendingReject;
       this.pendingResolve = null;
       this.pendingReject = null;
+      if (!resolve || !reject) continue;
+      try {
+        resolve(JSON.parse(line));
+      } catch (e) {
+        reject(new Error(`Invalid JSON: ${line}`));
+      }
     }
   }
 
-  private async send(cmd: Record<string, any>): Promise<any> {
+  // The protocol carries no request id, so replies are matched by order: one request on the
+  // wire at a time, and a request that times out takes the connection down with it, because
+  // its late reply would otherwise be handed to the next request.
+  private send(cmd: Record<string, any>): Promise<any> {
+    const result = this.queue.then(() => this.exchange(cmd));
+    this.queue = result.catch(() => undefined);
+    return result;
+  }
+
+  private exchange(cmd: Record<string, any>): Promise<any> {
     if (!this.connected || !this.socket) {
-      throw new Error('Not connected to PCSX2 Debug Server');
+      return Promise.reject(new Error('Not connected to PCSX2 Debug Server'));
     }
 
     return new Promise((resolve, reject) => {
-      this.pendingResolve = resolve;
-      this.pendingReject = reject;
-
-      const json = JSON.stringify(cmd) + '\n';
-      this.socket!.write(json);
-
-      // Timeout
-      setTimeout(() => {
-        if (this.pendingReject === reject) {
-          this.pendingResolve = null;
-          this.pendingReject = null;
-          reject(new Error(`Command timeout: ${cmd.cmd}`));
-        }
+      const timer = setTimeout(() => {
+        if (this.pendingReject !== settleReject) return;
+        this.pendingResolve = null;
+        this.pendingReject = null;
+        reject(new Error(`Command timeout: ${cmd.cmd}`));
+        this.socket?.destroy();
       }, 10000);
+      const settleResolve = (data: any) => { clearTimeout(timer); resolve(data); };
+      const settleReject = (err: Error) => { clearTimeout(timer); reject(err); };
+
+      this.pendingResolve = settleResolve;
+      this.pendingReject = settleReject;
+      this.socket!.write(JSON.stringify(cmd) + '\n');
     });
   }
 

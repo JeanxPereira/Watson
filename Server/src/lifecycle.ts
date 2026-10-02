@@ -5,6 +5,7 @@ import { execFile } from 'node:child_process';
 export interface Host {
   run(file: string, args: string[]): Promise<{ code: number; output: string }>;
   processPath(pid: number): Promise<string | null>;
+  isRunning(pid: number): Promise<boolean>;
   terminate(pid: number): Promise<void>;
 }
 
@@ -33,6 +34,32 @@ export async function launch(host: Host, root: string, options: LaunchOptions): 
 }
 
 export interface Probe { (): Promise<{ alive: boolean; frame: number }>; }
+export interface StatusSource {
+  isConnected(): boolean;
+  disconnect(): void;
+  getStatus(): Promise<{ alive: boolean; frame: number }>;
+}
+
+/**
+ * A probe that holds one connection and asks it again on each poll. The DebugServer serves a
+ * single client, so opening a new connection per poll while an earlier one is still up would be
+ * refused every time.
+ */
+export function reusingProbe<T extends StatusSource>(open: () => Promise<T>): { probe: Probe; current: () => T | null } {
+  let held: T | null = null;
+  const probe = async () => {
+    if (!held || !held.isConnected()) held = await open();
+    try {
+      return await held.getStatus();
+    } catch (error) {
+      held.disconnect();
+      held = null;
+      throw error;
+    }
+  };
+  return { probe, current: () => held };
+}
+
 export interface WaitOptions { timeoutMs: number; intervalMs: number; logTail: () => string; }
 
 /**
@@ -48,7 +75,7 @@ export async function launchAndWait(host: Host, root: string, options: LaunchOpt
   let last = 'never tried';
 
   while (Date.now() < deadline) {
-    if ((await host.processPath(pid)) === null) {
+    if (!(await host.isRunning(pid))) {
       fs.rmSync(pidFile(root), { force: true });
       throw new Error(`pid ${pid} exited before the DebugServer answered (last: ${last})${log()}`);
     }
@@ -70,10 +97,13 @@ export async function launchAndWait(host: Host, root: string, options: LaunchOpt
 export async function kill(host: Host, root: string): Promise<string> {
   if (!fs.existsSync(pidFile(root))) throw new Error('no Watson emulator was launched from this checkout');
   const pid = Number(fs.readFileSync(pidFile(root), 'utf8').trim());
-  const found = await host.processPath(pid);
-  if (found === null) {
+  if (!(await host.isRunning(pid))) {
     fs.rmSync(pidFile(root));
     return `pid ${pid} had already exited`;
+  }
+  const found = await host.processPath(pid);
+  if (found === null) {
+    throw new Error(`pid ${pid} is running but its executable could not be read; not killing it`);
   }
   if (!same(found, emulatorPath(root))) {
     throw new Error(`pid ${pid} now belongs to ${found}, not the Watson emulator; not killing it`);
@@ -98,6 +128,11 @@ export const systemHost: Host = {
     const { output } = await execute('pwsh', ['-NoProfile', '-Command', `(Get-Process -Id ${pid} -ErrorAction SilentlyContinue).Path`]);
     const found = output.trim();
     return found.length > 0 ? found : null;
+  },
+  // Signal 0 only asks whether the process exists. A just-started process can report no
+  // executable path for a moment, so the path is not used to decide whether it is alive.
+  async isRunning(pid) {
+    try { process.kill(pid, 0); return true; } catch (error: any) { return error.code === 'EPERM'; }
   },
   async terminate(pid) {
     await execute('pwsh', ['-NoProfile', '-Command', `Stop-Process -Id ${pid} -Force`]);

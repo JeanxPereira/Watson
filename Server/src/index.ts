@@ -15,7 +15,7 @@ import * as path from 'node:path';
 import * as fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { pressPad, takeSnapshot, takeGsDump } from './navigation.js';
-import { launchAndWait, kill, systemHost } from './lifecycle.js';
+import { launchAndWait, reusingProbe, kill, systemHost } from './lifecycle.js';
 import { findConfig, loadCatalog, resolveLaunch, registerState, describeStates, Catalog } from './catalog.js';
 
 // ===== State =====
@@ -589,25 +589,21 @@ server.tool('watson_launch',
     try {
       const { bios, elf, state } = resolveLaunch(catalog(), request);
       if (state && !fs.existsSync(state)) throw new Error(`state file not found: ${state}`);
-      let connected: DebugServerClient | null = null;
-      const probe = async () => {
+      const { probe, current } = reusingProbe(async () => {
         const client = new DebugServerClient('127.0.0.1', 21512);
-        try {
-          await client.connect();
-          const status = await client.getStatus();
-          connected?.disconnect();
-          connected = client;
-          return status;
-        } catch (error) {
-          client.disconnect();
-          throw error;
-        }
-      };
+        try { await client.connect(); return client; } catch (error) { client.disconnect(); throw error; }
+      });
       debugServer?.disconnect();
       debugServer = null;
-      const started = await launchAndWait(systemHost, WATSON_ROOT, { bios, elf, state }, probe,
-        { timeoutMs: 60000, intervalMs: 500, logTail: emulatorLogTail });
-      debugServer = connected;
+      let started;
+      try {
+        started = await launchAndWait(systemHost, WATSON_ROOT, { bios, elf, state }, probe,
+          { timeoutMs: 60000, intervalMs: 500, logTail: emulatorLogTail });
+      } catch (error) {
+        current()?.disconnect();
+        throw error;
+      }
+      debugServer = current();
       return text(`launched pid ${started.pid}; connected; alive=${started.alive} frame=${started.frame}`);
     } catch (e: any) { return failure(e); }
   }

@@ -628,6 +628,8 @@ server.tool('watson_kill', 'Terminate the PCSX2 that watson_launch started. Neve
   async () => {
     try {
       debugServer?.disconnect();
+      // With several instances, instance 0 may be another server's: only kill what this one launched.
+      if ((catalog()?.instances ?? 1) > 1 && !ownsEmulator) throw new Error('this server launched no emulator');
       debugServer = null;
       const result = await kill(systemHost, WATSON_ROOT, instance);
       ownsEmulator = false;

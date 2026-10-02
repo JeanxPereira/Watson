@@ -16,6 +16,7 @@ import * as fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { pressPad, takeSnapshot, takeGsDump } from './navigation.js';
 import { launch, kill, systemHost } from './lifecycle.js';
+import { findConfig, loadCatalog, resolveLaunch, registerState, describeStates, Catalog } from './catalog.js';
 
 // ===== State =====
 let debugServer: DebugServerClient | null = null;
@@ -48,6 +49,20 @@ function hasPine(): boolean { return pine?.isConnected() ?? false; }
 
 const WATSON_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const CAPTURES = path.join(WATSON_ROOT, 'Runtime', 'captures');
+const STATES = path.join(WATSON_ROOT, 'Runtime', 'states');
+
+// The consumer's watson.json: --config <file>, else WATSON_CONFIG, else the first one walking
+// up from the working directory. Read on every use, so an edit takes effect without a restart.
+function configFile(): string | null {
+  const flag = process.argv.indexOf('--config');
+  const explicit = flag >= 0 ? process.argv[flag + 1] : process.env.WATSON_CONFIG;
+  return findConfig(process.cwd(), explicit);
+}
+
+function catalog(): Catalog | null {
+  const file = configFile();
+  return file ? loadCatalog(file) : null;
+}
 
 function requireDebug(): DebugServerClient {
   if (!hasDebug()) throw new Error('No DebugServer connection — use watson_connect first');
@@ -554,10 +569,17 @@ server.tool('watson_clear_all_breakpoints', 'Clear ALL breakpoints and watchpoin
 //  Lifecycle
 // ==========================================================
 server.tool('watson_launch',
-  'Start the Watson PCSX2 and connect to it. Give a BIOS to boot it, optionally an ELF to run and a save state to load.',
-  { bios: z.string().optional(), elf: z.string().optional(), state: z.string().optional() },
-  async ({ bios, elf, state }) => {
+  'Start the Watson PCSX2 and connect to it. Prefer build + state by name from watson.json (see watson_states), e.g. build "rom-0230A", state "clock". Files can be given instead: bios, elf, and state as a .p2s path.',
+  {
+    build: z.string().optional().describe('Build id from watson.json'),
+    state: z.string().optional().describe('State name within the build, or a .p2s file path'),
+    bios: z.string().optional(),
+    elf: z.string().optional(),
+  },
+  async (request) => {
     try {
+      const { bios, elf, state } = resolveLaunch(catalog(), request);
+      if (state && !fs.existsSync(state)) throw new Error(`state file not found: ${state}`);
       const pid = await launch(systemHost, WATSON_ROOT, { bios, elf, state });
       const deadline = Date.now() + 60000;
       let last = 'never tried';
@@ -566,7 +588,7 @@ server.tool('watson_launch',
           const client = new DebugServerClient('127.0.0.1', 21512);
           await client.connect();
           const st = await client.getStatus();
-          if (bios && !st.alive) { client.disconnect(); throw new Error('the VM has not booted yet'); }
+          if ((bios || elf) && !st.alive) { client.disconnect(); throw new Error('the VM has not booted yet'); }
           debugServer?.disconnect();
           debugServer = client;
           return text(`launched pid ${pid}; connected; alive=${st.alive} frame=${st.frame}`);
@@ -583,6 +605,35 @@ server.tool('watson_kill', 'Terminate the PCSX2 that watson_launch started. Neve
       debugServer?.disconnect();
       debugServer = null;
       return text(await kill(systemHost, WATSON_ROOT));
+    } catch (e: any) { return failure(e); }
+  }
+);
+
+server.tool('watson_states', 'List the save states named in watson.json, per build, with their files.', {},
+  async () => {
+    try {
+      const known = catalog();
+      if (!known) return text('no watson.json was found; pass --config <file> to the server or run it inside the project');
+      return text(`${known.file}\n${describeStates(known).join('\n')}`);
+    } catch (e: any) { return failure(e); }
+  }
+);
+
+server.tool('watson_state_save',
+  'Save the current emulator state under a name for a build and record it in watson.json, so watson_launch can load it by name later.',
+  { build: z.string(), name: z.string().describe('Lowercase letters, digits and hyphens, e.g. "clock"') },
+  async ({ build, name }) => {
+    try {
+      const known = catalog();
+      if (!known) throw new Error('no watson.json was found, so there is nowhere to record the name');
+      if (!known.builds.some((candidate) => candidate.id === build)) {
+        throw new Error(`unknown build ${build}; known: ${known.builds.map((b) => b.id).join(', ')}`);
+      }
+      const file = path.join(STATES, `${build}-${name}.p2s`);
+      registerState(known.file, build, name, file);
+      fs.mkdirSync(STATES, { recursive: true });
+      await requireDebug().saveStateFile(file);
+      return text(`saved ${build} / ${name} -> ${file}`);
     } catch (e: any) { return failure(e); }
   }
 );

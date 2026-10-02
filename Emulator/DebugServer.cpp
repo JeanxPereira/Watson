@@ -49,6 +49,12 @@ typedef int socket_t;
 #include "MipsStackWalk.h"
 #include "Host.h"
 #include "VMManager.h"
+#include "Counters.h"
+#include "MTGS.h"
+#include "GS/GS.h"
+#include "SIO/Pad/Pad.h"
+#include "SIO/Pad/PadDualshock2.h"
+#include "common/Error.h"
 
 #include <cstring>
 #include <cstdio>
@@ -351,6 +357,30 @@ namespace DebugServer
 		return j.str();
 	}
 
+	// Paths cross the wire with forward slashes because this JSON reader does not unescape
+	// backslashes. PCSX2 opens files through the \\?\ extended-length form, which takes no
+	// forward slash, so a path is made native before PCSX2 sees it.
+	static std::string wirePath(const std::unordered_map<std::string, JsonValue>& m, const char* key)
+	{
+		std::string path = getStr(m, key, "");
+#ifdef _WIN32
+		std::replace(path.begin(), path.end(), '/', '\\');
+#endif
+		return path;
+	}
+
+	struct PadButton { const char* name; u32 bind; };
+	static const PadButton s_padButtons[] = {
+		{"up", PadDualshock2::Inputs::PAD_UP}, {"right", PadDualshock2::Inputs::PAD_RIGHT},
+		{"down", PadDualshock2::Inputs::PAD_DOWN}, {"left", PadDualshock2::Inputs::PAD_LEFT},
+		{"triangle", PadDualshock2::Inputs::PAD_TRIANGLE}, {"circle", PadDualshock2::Inputs::PAD_CIRCLE},
+		{"cross", PadDualshock2::Inputs::PAD_CROSS}, {"square", PadDualshock2::Inputs::PAD_SQUARE},
+		{"select", PadDualshock2::Inputs::PAD_SELECT}, {"start", PadDualshock2::Inputs::PAD_START},
+		{"l1", PadDualshock2::Inputs::PAD_L1}, {"l2", PadDualshock2::Inputs::PAD_L2},
+		{"r1", PadDualshock2::Inputs::PAD_R1}, {"r2", PadDualshock2::Inputs::PAD_R2},
+		{"l3", PadDualshock2::Inputs::PAD_L3}, {"r3", PadDualshock2::Inputs::PAD_R3},
+	};
+
 	static std::string handleOnCpuThread(const std::string& jsonLine)
 	{
 		auto params = parseJsonObject(jsonLine);
@@ -370,6 +400,7 @@ namespace DebugServer
 			j.kv("paused", cpu->isCpuPaused());
 			j.key("pc"); j.valHex32(cpu->getPC());
 			j.kv("cycles", (int64_t)cpu->getCycles());
+			j.kv("frame", (int64_t)g_FrameCount);
 			j.endObject();
 			j.endObject();
 		}
@@ -827,6 +858,76 @@ namespace DebugServer
 			j.kv("ok", true);
 			j.endObject();
 		}
+		// ----- PAD SET -----
+		else if (cmd == "pad_set")
+		{
+			const std::string list = getStr(params, "buttons", "");
+			const float value = getNum(params, "value", 1) != 0 ? 1.0f : 0.0f;
+			std::vector<u32> binds;
+			std::string unknown;
+			size_t start = 0;
+			while (start <= list.size())
+			{
+				size_t end = list.find(',', start);
+				if (end == std::string::npos) end = list.size();
+				const std::string name = list.substr(start, end - start);
+				start = end + 1;
+				if (name.empty()) continue;
+				bool found = false;
+				for (const PadButton& button : s_padButtons)
+					if (name == button.name) { binds.push_back(button.bind); found = true; break; }
+				if (!found) unknown = name;
+			}
+			if (!unknown.empty() || binds.empty())
+			{
+				std::string valid;
+				for (const PadButton& button : s_padButtons)
+					valid += std::string(valid.empty() ? "" : ", ") + button.name;
+				return errorReply((unknown.empty() ? std::string("no buttons given") : "unknown button " + unknown) + "; valid: " + valid);
+			}
+			for (const u32 bind : binds)
+				Pad::SetControllerState(0, bind, value);
+			j.startObject();
+			j.kv("ok", true);
+			j.endObject();
+		}
+		// ----- QUEUE SNAPSHOT -----
+		else if (cmd == "queue_snapshot")
+		{
+			const std::string path = wirePath(params, "path");
+			const u32 dumpFrames = (u32)getNum(params, "dump_frames", 0);
+			if (path.size() < 5 || path.substr(path.size() - 4) != ".png")
+				return errorReply("path must end in .png");
+			MTGS::RunOnGSThread([path, dumpFrames]() { GSQueueSnapshot(path, dumpFrames); });
+			j.startObject();
+			j.kv("ok", true);
+			j.endObject();
+		}
+		// ----- SAVE STATE FILE -----
+		else if (cmd == "save_state_file")
+		{
+			const std::string path = wirePath(params, "path");
+			if (path.empty())
+				return errorReply("path is required");
+			auto failure = std::make_shared<std::string>();
+			VMManager::SaveState(path.c_str(), false, false, [failure](const std::string& message) { *failure = message; });
+			if (!failure->empty())
+				return errorReply("save state failed: " + *failure);
+			j.startObject();
+			j.kv("ok", true);
+			j.endObject();
+		}
+		// ----- LOAD STATE FILE -----
+		else if (cmd == "load_state_file")
+		{
+			const std::string path = wirePath(params, "path");
+			Error error;
+			if (!VMManager::LoadState(path.c_str(), &error))
+				return errorReply("load state failed: " + error.GetDescription());
+			j.startObject();
+			j.kv("ok", true);
+			j.endObject();
+		}
 		// ----- UNKNOWN COMMAND -----
 		else
 		{
@@ -842,7 +943,8 @@ namespace DebugServer
 				"set_memcheck", "remove_memcheck", "list_memchecks",
 				"pause", "resume", "step", "step_over",
 				"get_threads", "get_modules",
-				"is_valid_address", "clear_breakpoints"
+				"is_valid_address", "clear_breakpoints",
+				"frame_advance", "pad_set", "queue_snapshot", "save_state_file", "load_state_file"
 			};
 			for (const char* c : cmds) j.valStr(c);
 			j.endArray();
@@ -901,6 +1003,36 @@ namespace DebugServer
 		return read ? *reply : errorReply("the CPU thread did not report the step result");
 	}
 
+	static std::string handleFrameAdvance(DebugInterface* cpu, int64_t frames)
+	{
+		if (frames < 1 || frames > 3600)
+			return errorReply("frames must be between 1 and 3600");
+
+		const u32 count = (u32)frames;
+		if (!runOnCpuThread([count]() { VMManager::FrameAdvance(count); }))
+			return errorReply("the CPU thread did not accept frame_advance");
+
+		// FrameAdvance switched the VM to Running on the CPU thread; it pauses itself after the
+		// last frame. Allow real time for slow frames.
+		for (int waited = 0; waited < 2000 + (int)count * 100; waited += 2)
+		{
+			if (!s_running.load())
+				return errorReply("the server is stopping");
+			if (VMManager::GetState() == VMState::Paused)
+				break;
+			std::this_thread::sleep_for(std::chrono::milliseconds(2));
+		}
+		if (VMManager::GetState() != VMState::Paused)
+			return errorReply("the VM did not pause after frame_advance");
+
+		JsonBuilder j;
+		j.startObject();
+		j.kv("ok", true);
+		j.kv("frame", (int64_t)g_FrameCount);
+		j.endObject();
+		return j.str();
+	}
+
 	static std::string handleCommand(const std::string& jsonLine)
 	{
 		auto params = parseJsonObject(jsonLine);
@@ -918,6 +1050,9 @@ namespace DebugServer
 
 		if (cmd == "step" || cmd == "step_over")
 			return handleStep(cpuName, cpu, cmd == "step_over");
+
+		if (cmd == "frame_advance")
+			return handleFrameAdvance(cpu, getNum(params, "frames", 1));
 
 		auto reply = std::make_shared<std::string>();
 		const bool ran = runOnCpuThread([jsonLine, reply]() { *reply = handleOnCpuThread(jsonLine); });

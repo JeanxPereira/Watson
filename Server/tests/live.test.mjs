@@ -112,3 +112,88 @@ test('live: a second client is refused while the first keeps working', async (t)
     second.disconnect();
   }
 });
+
+test('live: frame_advance runs exactly N frames and leaves the VM paused', async (t) => {
+  if (!(await listening())) return t.skip(`nothing listening on 127.0.0.1:${PORT}; start Emulator/Run.ps1`);
+  if (!EXPECT_VM) return t.skip('needs a running VM');
+  const client = new DebugServerClient('127.0.0.1', PORT);
+  await client.connect();
+  try {
+    await client.pause();
+    const before = (await client.getStatus()).frame;
+    const after = await client.frameAdvance(5);
+    const st = await client.getStatus();
+    assert.equal(after - before, 5);
+    assert.equal(st.frame, after);
+    assert.equal(st.paused, true);
+  } finally {
+    await client.resume();
+    client.disconnect();
+  }
+});
+
+test('live: an unknown pad button is refused and names the valid ones', async (t) => {
+  if (!(await listening())) return t.skip(`nothing listening on 127.0.0.1:${PORT}; start Emulator/Run.ps1`);
+  if (!EXPECT_VM) return t.skip('needs a running VM');
+  const client = new DebugServerClient('127.0.0.1', PORT);
+  await client.connect();
+  try {
+    await assert.rejects(client.padSet(['cross', 'turbo'], 1), /turbo.*triangle.*cross/is);
+    await client.padSet(['cross'], 1);
+    await client.padSet(['cross'], 0);
+  } finally {
+    client.disconnect();
+  }
+});
+
+test('live: a state saved to a file loads back to the same frame', async (t) => {
+  if (!(await listening())) return t.skip(`nothing listening on 127.0.0.1:${PORT}; start Emulator/Run.ps1`);
+  if (!EXPECT_VM) return t.skip('needs a running VM');
+  const os = await import('node:os');
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'watson-')), 'probe.p2s');
+  const client = new DebugServerClient('127.0.0.1', PORT);
+  await client.connect();
+  try {
+    await client.pause();
+    const saved = (await client.getStatus()).frame;
+    await client.saveStateFile(file);
+    assert.ok(fs.statSync(file).size > 0);
+    await client.frameAdvance(10);
+    await client.loadStateFile(file);
+    assert.equal((await client.getStatus()).frame, saved);
+  } finally {
+    await client.resume();
+    client.disconnect();
+  }
+});
+
+test('live: from one saved state, the same frames give the same snapshot bytes', async (t) => {
+  if (!(await listening())) return t.skip(`nothing listening on 127.0.0.1:${PORT}; start Emulator/Run.ps1`);
+  if (!EXPECT_VM) return t.skip('needs a running VM');
+  const os = await import('node:os');
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const crypto = await import('node:crypto');
+  const { takeSnapshot } = await import('../dist/navigation.js');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'watson-'));
+  const state = path.join(dir, 'origin.p2s');
+  const client = new DebugServerClient('127.0.0.1', PORT);
+  await client.connect();
+  const hash = (file) => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+  try {
+    await client.pause();
+    await client.saveStateFile(state);
+    const shots = [];
+    for (const name of ['a.png', 'b.png']) {
+      await client.loadStateFile(state);
+      await client.frameAdvance(30);
+      shots.push(hash(await takeSnapshot(client, path.join(dir, name))));
+    }
+    assert.equal(shots[0], shots[1]);
+  } finally {
+    await client.resume();
+    client.disconnect();
+  }
+});

@@ -157,3 +157,16 @@ test('the summary of a mismatch or a lost queue is PARTIAL', () => {
   const text = formatTrace(trace, compareTraceToDump(trace, dumpOf([B, 'vsync'])), { trace: 't', dump: 'd' });
   assert.match(text, /verdict: PARTIAL the trace and the dump differ: .*coverage 0\/1$/);
 });
+
+test('the summary lists the twelve largest sources and says how many it left out', () => {
+  const records = [header];
+  for (let id = 1; id <= 15; id++) records.push({ ...gif, id, ra: `0x002020${id.toString(16).padStart(2, '0')}` });
+  records.push(vsync);
+  for (let id = 1; id <= 15; id++) records.push(data(3, 'dma', id, 'ee', 0x400000, 16 * id), packet(3, bytes(16 * id, id)));
+  const trace = readTrace(traceFile(records));
+  const text = formatTrace(trace, { transfers: 15, matched: 15, vsyncs: 0 }, { trace: 't', dump: 'd' });
+  assert.equal(text.split('\n').filter((line) => /PATH3 dma/.test(line)).length, 12);
+  assert.match(text, /ra 0x0020200f/);
+  assert.doesNotMatch(text, /ra 0x00202001\b/);
+  assert.match(text, /and 3 more sources, 96 bytes; every one is in the trace file/);
+});

@@ -135,6 +135,7 @@ function tracer(onQueue) {
   const emulator = recorder(onQueue);
   emulator.gifTraceStart = async (file) => { emulator.calls.push(['gifTraceStart', path.basename(file)]); };
   emulator.gifTraceStop = async () => { emulator.calls.push(['gifTraceStop']); return 7; };
+  emulator.pause = async () => { emulator.calls.push(['pause']); };
   return emulator;
 }
 const completeDump = (queued) => {
@@ -148,8 +149,8 @@ test('takeGifTrace starts the trace before the dump is queued and stops it after
   const files = await takeGifTrace(emulator, png, 1);
   assert.equal(path.basename(files.trace), 'shot.trace.jsonl');
   assert.equal(files.dump, png.replace(/\.png$/, '.gs'));
-  assert.deepEqual(emulator.calls[0], ['gifTraceStart', 'shot.trace.jsonl']);
-  assert.deepEqual(emulator.calls[1], ['queueSnapshot', 'shot.png', 1]);
+  // A VM left running would run a frame between the two, and the dump would begin a vsync late.
+  assert.deepEqual(emulator.calls.slice(0, 3), [['pause'], ['gifTraceStart', 'shot.trace.jsonl'], ['queueSnapshot', 'shot.png', 1]]);
   assert.deepEqual(emulator.calls.at(-1), ['gifTraceStop']);
   assert.equal(emulator.calls.filter((call) => call[0] === 'gifTraceStop').length, 1);
 });
@@ -167,7 +168,7 @@ test('takeGifTrace queues nothing when the trace is refused', async () => {
   const emulator = tracer(() => {});
   emulator.gifTraceStart = async () => { throw new Error('the EE recompiler is on'); };
   await assert.rejects(takeGifTrace(emulator, path.join(os.tmpdir(), 'never.png'), 1), /recompiler/);
-  assert.deepEqual(emulator.calls, []);
+  assert.deepEqual(emulator.calls, [['pause']]);
 });
 
 test('takeGifTrace removes a trace left by an earlier capture before it starts', async () => {

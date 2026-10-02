@@ -48,6 +48,7 @@ typedef int socket_t;
 #include "DebugInterface.h"
 #include "Breakpoints.h"
 #include "MipsStackWalk.h"
+#include "Config.h"
 #include "Host.h"
 #include "VMManager.h"
 #include "Counters.h"
@@ -1121,6 +1122,15 @@ namespace DebugServer
 
 		if (!cpu->isAlive())
 			return errorReply("no VM is running; boot one before sending " + cmd);
+
+		// The EE interpreter only checks breakpoints and watchpoints in developer builds. In this
+		// one a breakpoint set under it never fires and a step never stops.
+		if (getBpCpu(cpuName) == BREAKPOINT_EE && !CHECK_EEREC &&
+			(cmd == "set_breakpoint" || cmd == "set_memcheck" || cmd == "step" || cmd == "step_over"))
+		{
+			return errorReply("the EE interpreter of this build never checks breakpoints or watchpoints, so " + cmd +
+				" would silently do nothing; launch without the interpreter option");
+		}
 
 		if (cmd == "step" || cmd == "step_over")
 			return handleStep(cpuName, cpu, cmd == "step_over");

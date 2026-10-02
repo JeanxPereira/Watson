@@ -143,7 +143,8 @@ Frame 1 of the dump (field 1, target `0x046`), 176 draws, numbered from 0.
 
 - A rod's first draw samples a buffer the GS drew earlier in the same frame, not an uploaded
   texture. That is on the wire.
-- The dump does not say which EE function sent which draw. That needs `gif_trace`.
+- The dump does not say which EE function sent which draw. The trace does:
+  `rom-0230A-clock-origins.md`.
 - Textures `0x2d00`, `0x2d40`, `0x2bc0`, `0x2c00`, `0x2e00`, `0x2e40` are in VRAM before the
   dump starts; their pixels are in the dump's state blob and are not extracted yet.
 - Vertex colours, texture coordinates and depth values per draw are in

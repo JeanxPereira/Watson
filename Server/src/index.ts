@@ -14,7 +14,8 @@ import { PineClient, EmuStatus } from './pine-client.js';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { pressPad, takeSnapshot, takeGsDump } from './navigation.js';
+import { pressPad, takeSnapshot, takeGsDump, takeGifTrace } from './navigation.js';
+import { readTrace, compareTraceToDump, formatTrace } from './gs/trace.js';
 import { launchAndWait, reusingProbe, kill, systemHost } from './lifecycle.js';
 import { parseGsDump, formatSummary } from './gs/parse.js';
 import { walkGsDump } from './gsdump.js';
@@ -690,6 +691,25 @@ server.tool('watson_gs_dump', 'Capture N frames to an uncompressed GS dump (.gs)
       const frame = (await client.getStatus()).frame;
       const files = await takeGsDump(client, capturePath(given, `dump-${frame}`), frames);
       return text(`dump: ${files.dump}\npng: ${files.png}`);
+    } catch (e: any) { return failure(e); }
+  }
+);
+
+server.tool('watson_gif_trace',
+  'Record, for N frames, every packet the EE side sends to the GS with where it came from: GIF path, source address, the EE instruction and call stack that started the DMA, the VU1 program counter. Captures a GS dump and a PNG of the same frames and checks the trace against the dump byte for byte. Needs watson_launch with interpreter: true. Leaves the VM paused. Feed the trace to watson_gsdump_parse to tie each draw to its origin.',
+  { frames: z.number().int().min(1).max(600).default(1), path: z.string().optional().describe('Absolute .png path; the dump and the trace take the same name with .gs and .trace.jsonl') },
+  async ({ frames, path: given }) => {
+    try {
+      const client = requireDebug();
+      const frame = (await client.getStatus()).frame;
+      const files = await takeGifTrace(client, capturePath(given, `trace-${frame}`), frames);
+      const trace = readTrace(files.trace);
+      if (!trace.complete) {
+        return { content: [{ type: 'text' as const, text: `trace: ${files.trace}\nbuild: unknown\nverdict: NOT VERIFIED ${trace.reason}  coverage 0/?` }], isError: true };
+      }
+      const parity = compareTraceToDump(trace, fs.readFileSync(files.dump));
+      const failed = Boolean(parity.mismatch) || trace.desyncs.length > 0;
+      return { content: [{ type: 'text' as const, text: formatTrace(trace, parity, files) }], ...(failed ? { isError: true } : {}) };
     } catch (e: any) { return failure(e); }
   }
 );

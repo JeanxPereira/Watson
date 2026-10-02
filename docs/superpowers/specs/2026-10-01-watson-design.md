@@ -190,16 +190,31 @@ The parser reads uncompressed and Zstandard dumps (Node's `zlib`). An LZMA dump 
 ### 5.5 `gif_trace`
 
 The GS dump is recorded on the GS thread, where the EE program counter is no longer known.
-`gif_trace` records on the EE side, at the points where data enters each path:
+`gif_trace` records on the EE side. As built (plan `2026-10-02-watson-gif-trace.md`), the hooks
+at the pinned tag are:
 
-- PATH3: the GIF DMA channel start.
-- PATH2: VIF1 `DIRECT` and `DIRECTHL`.
-- PATH1: VU1 `XGKICK`.
+- `dmaVIF1()` and `dmaGIF()`: the EE sets channel 1 or 2 going. An `origin` record: channel
+  registers, EE `pc`, `ra`, `sp` and a stack walk (`MipsStackWalk`).
+- `Gif_Unit::TransferGSPacketData`: bytes enter a path, for all of `XGKICK` (PATH1), `DIRECT`
+  and `DIRECTHL` (PATH2), `DMA` and `FIFO` (PATH3). A `data` record: path, kind, the origin it
+  belongs to, where the bytes were read from (EE RAM, scratchpad, VU1 memory) and their size;
+  for PATH1 also the VU1 program counter.
+- The PATH3 rewind and the soft reset in `Gif_Path`: bytes leave a path unsent.
+- `Gif_AddCompletedGSPacket`: a packet enters the MTGS ring, with its bytes. These are the
+  dump's transfer packets, one for one.
+- `gsPostVsyncStart`: vsync.
 
-Each record: frame number, path, source address and size in quadwords, the bytes, EE `pc`,
-`ra`, and a stack walk (`MipsStackWalk`). For PATH1 the record also holds the VU1 program
-counter. The exact upstream functions hooked are chosen in phase 3 by reading the pinned
-source; the three entry points above are the contract.
+The server replays each path's byte queue, so every byte of every packet is tied to a `data`
+record, and checks its own count against the emulator's after each packet.
+
+**The trace needs the EE and VU1 interpreters** (`watson_launch` with `interpreter: true`).
+Under the recompilers a hardware write does not write the program counter back, and guest
+registers may sit in host registers, so `pc`, `ra` and `sp` would not be those of the
+instruction. `gif_trace_start` refuses under them. Under the EE interpreter of a release
+build breakpoints and watchpoints never fire, so the server refuses to set them there.
+
+`watson_gif_trace` always captures a GS dump and a PNG of the same frames and checks the trace
+against the dump before answering.
 
 ### 5.6 Symbols and identity
 
@@ -284,8 +299,10 @@ otherwise:
 - **G1 identity.** Launching each build in a fixture `watson.json` reports that build's id.
 - **G2 determinism.** From one savestate, `frame_advance(N)` then `snapshot`, twice, gives
   identical PNG bytes.
-- **G3 trace parity.** For the same frames, the transfers recorded by `gif_trace` equal the
-  transfer packets in the GS dump: same order, same path, same bytes.
+- **G3 trace parity.** For the same frames, the packets recorded by `gif_trace` equal the
+  transfer packets in the GS dump: same order, same bytes, vsyncs in the same places. The path
+  is not compared: PCSX2 hands every path's packet to the GS through one function, so a dump
+  records path id 3 for all of them. The path is known from the trace alone.
 - **G4 render parity.** `gsdump_render` of a captured dump equals the live `snapshot` of the
   same frame.
 
@@ -313,6 +330,10 @@ rather than by hand. That plan leaves out `watson_run_until` and `watson_gs_regs
 does not need the first, and the GS privileged registers are already category 6 of
 `watson_read_registers`.
 
+Phase 3 was split. `gif_trace` and gate G3 were delivered by plan
+`2026-10-02-watson-gif-trace.md`. Build identity by fingerprint, symbols, and the answer
+contract on every tool (success criterion 4, gate G1) are still owed and get their own plan.
+
 ## 11. Open questions resolved by phase 0 and 1, not by assumption
 
 - Whether `hddosd.elf` boots to the clock under `-elf` in PCSX2. If it does not, the HDD OSD
@@ -320,4 +341,6 @@ does not need the first, and the GS privileged registers are already category 6 
 - Whether OSDSYS reaches the clock by idling or needs pad input; this decides how
   `watson_pad` is first exercised.
 - Whether the clock sends geometry on PATH1 (VU1), which an earlier note in CrystalOSD denies
-  without a build id. The first `gif_trace` answers it.
+  without a build id. The first `gif_trace` answers it. Answered for ROM 2.30
+  (`0230AC20080220`): no. Geometry goes on PATH2 from the scratchpad, state on PATH3; see
+  `docs/findings/rom-0230A-clock-origins.md`.

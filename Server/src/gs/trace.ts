@@ -183,6 +183,9 @@ export function describeSource(trace: Trace, path: number, source: Source): stri
   return `${what}, ${verb} at pc ${origin.pc} ra ${origin.ra}`;
 }
 
+/** Sources listed in a summary; a busy screen has a hundred. */
+const SHOWN = 12;
+
 export function formatTrace(trace: Trace, parity: Parity, files: { trace: string; dump: string; png?: string }): string {
   const groups = new Map<string, { packets: number; bytes: number; stack: string }>();
   for (const packet of trace.packets) {
@@ -195,6 +198,8 @@ export function formatTrace(trace: Trace, parity: Parity, files: { trace: string
     }
   }
   const rows = [...groups.entries()].sort((a, b) => b[1].bytes - a[1].bytes);
+  const shown = rows.slice(0, SHOWN);
+  const hidden = rows.slice(SHOWN);
   const bytes = trace.packets.reduce((sum, packet) => sum + packet.bytes.length, 0);
 
   let verdict = `FOUND ${trace.packets.length} packets`;
@@ -209,7 +214,8 @@ export function formatTrace(trace: Trace, parity: Parity, files: { trace: string
     `frames: ${trace.vsyncAt.length}   packets: ${trace.packets.length}   bytes: ${bytes}   before the first vsync: ${trace.preroll.length} packets`,
     `origins recorded: ${trace.origins.size}`,
     'sources, by bytes (packets they begin, bytes, function entries of the stack):',
-    ...rows.map(([key, group]) => `  ${String(group.packets).padStart(5)}  ${String(group.bytes).padStart(8)}  ${key}${group.stack ? `\n${' '.repeat(19)}stack ${group.stack}` : ''}`),
+    ...shown.map(([key, group]) => `  ${String(group.packets).padStart(5)}  ${String(group.bytes).padStart(8)}  ${key}${group.stack ? `\n${' '.repeat(19)}stack ${group.stack}` : ''}`),
+    ...(hidden.length > 0 ? [`  and ${hidden.length} more sources, ${hidden.reduce((sum, [, group]) => sum + group.bytes, 0)} bytes; every one is in the trace file`] : []),
     'build: unknown',
     `verdict: ${verdict}  coverage ${parity.matched}/${parity.transfers}`,
   ].join('\n');

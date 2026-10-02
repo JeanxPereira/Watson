@@ -97,16 +97,19 @@ export async function takeGsDump(emulator: Emulator, path: string, frames: numbe
 export interface Tracer extends Emulator {
   gifTraceStart(path: string): Promise<void>;
   gifTraceStop(): Promise<number>;
+  pause(): Promise<unknown>;
 }
 
 /**
- * Trace and dump the same frames. The trace is armed first, while the VM is paused, so both
- * instruments see the same vsync first; it is stopped only after the dump is closed, so it
- * covers every packet the dump holds.
+ * Trace and dump the same frames. The VM is paused and the trace armed before the dump is
+ * queued, so both instruments see the same vsync first: a VM left running would run a frame
+ * between the two requests and the dump would begin one vsync late. The trace is stopped only
+ * after the dump is closed, so it covers every packet the dump holds.
  */
 export async function takeGifTrace(emulator: Tracer, path: string, frames: number): Promise<{ png: string; dump: string; trace: string }> {
   const trace = path.replace(/\.png$/i, '.trace.jsonl');
   fs.rmSync(trace, { force: true });
+  await emulator.pause();
   await emulator.gifTraceStart(trace);
   let files: { png: string; dump: string };
   try {

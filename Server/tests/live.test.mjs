@@ -5,6 +5,12 @@ import { DebugServerClient } from '../dist/debug-server-client.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { takeGifTrace } from '../dist/navigation.js';
+import { readTrace, compareTraceToDump } from '../dist/gs/trace.js';
+
 const PORT = 21512;
 const EXPECT_VM = process.env.WATSON_EXPECT_VM === '1';
 
@@ -60,6 +66,7 @@ test('live: a log watchpoint is refused instead of silently never counting', asy
   const client = new DebugServerClient('127.0.0.1', PORT);
   await client.connect();
   try {
+    if ((await client.getStatus()).interpreter) return t.skip('under the interpreter every watchpoint is refused; see that test');
     await assert.rejects(client.setMemcheck('0x00100000', '0x00100004', { action: 'log' }), /log/i);
     assert.deepEqual(await client.listMemchecks(), []);
   } finally {
@@ -231,6 +238,7 @@ test('live: frame_advance stopped by a breakpoint reports how far it got', async
   const client = new DebugServerClient('127.0.0.1', PORT);
   await client.connect();
   try {
+    if ((await client.getStatus()).interpreter) return t.skip('breakpoints never fire under the interpreter; see that test');
     await client.pause();
     // The EE kernel idle loop on ROM 2.30: reached within the first frame of any advance.
     await client.setBreakpoint('0x00081fc0');
@@ -267,6 +275,57 @@ test('live: a client that disconnects can reconnect at once, many times', async 
     await client.connect();
     const st = await client.getStatus();
     assert.equal(typeof st.alive, 'boolean', `attempt ${i}`);
+    client.disconnect();
+  }
+});
+
+test('live: G3, the GIF trace equals the GS dump of the same frames and loses no origin', async (t) => {
+  if (!(await listening())) return t.skip(`nothing listening on 127.0.0.1:${PORT}; start Emulator/Run.ps1`);
+  if (!EXPECT_VM) return t.skip('needs a running VM');
+  const client = new DebugServerClient('127.0.0.1', PORT);
+  await client.connect();
+  try {
+    if (!(await client.getStatus()).interpreter) return t.skip('the recompilers are on; launch with -Interpreter to trace');
+    const png = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'watson-g3-')), 'g3.png');
+    const files = await takeGifTrace(client, png, 2);
+    const trace = readTrace(files.trace);
+    assert.equal(trace.complete, true, trace.reason);
+    const parity = compareTraceToDump(trace, fs.readFileSync(files.dump));
+    assert.equal(parity.mismatch, undefined);
+    assert.ok(parity.transfers > 0);
+    assert.equal(parity.matched, parity.transfers);
+    assert.deepEqual(trace.desyncs.filter((index) => index >= 0), []);
+  } finally {
+    client.disconnect();
+  }
+});
+
+test('live: a trace is refused under the recompilers, naming the launch option', async (t) => {
+  if (!(await listening())) return t.skip(`nothing listening on 127.0.0.1:${PORT}; start Emulator/Run.ps1`);
+  if (!EXPECT_VM) return t.skip('needs a running VM');
+  const client = new DebugServerClient('127.0.0.1', PORT);
+  await client.connect();
+  try {
+    if ((await client.getStatus()).interpreter) return t.skip('the interpreters are on; this checks the recompiler refusal');
+    await assert.rejects(client.gifTraceStart(path.join(os.tmpdir(), 'watson-refused.trace.jsonl')), /interpreter option/);
+  } finally {
+    client.disconnect();
+  }
+});
+
+test('live: under the interpreter, breakpoints, watchpoints and steps are refused instead of silently never firing', async (t) => {
+  if (!(await listening())) return t.skip(`nothing listening on 127.0.0.1:${PORT}; start Emulator/Run.ps1`);
+  if (!EXPECT_VM) return t.skip('needs a running VM');
+  const client = new DebugServerClient('127.0.0.1', PORT);
+  await client.connect();
+  try {
+    if (!(await client.getStatus()).interpreter) return t.skip('the recompilers are on; breakpoints work');
+    await assert.rejects(client.setBreakpoint('0x00081fc0'), /interpreter.*never checks/);
+    await assert.rejects(client.setMemcheck('0x00100000', '0x00100004', { action: 'break' }), /interpreter.*never checks/);
+    await assert.rejects(client.step(), /interpreter.*never checks/);
+    assert.deepEqual(await client.listBreakpoints(), []);
+    assert.deepEqual(await client.listMemchecks(), []);
+  } finally {
     client.disconnect();
   }
 });

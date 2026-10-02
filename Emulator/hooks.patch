@@ -109,6 +109,26 @@ index 6b6fde5..b1b10db 100644
  		gifPath[tranType & 3].CopyGSPacketData(pMem, size, aligned);
  		size -= Execute(tranType == GIF_TRANS_DMA, false);
  		return size;
+diff --git a/pcsx2/Interpreter.cpp b/pcsx2/Interpreter.cpp
+index 4faad6c..6c557f0 100644
+--- a/pcsx2/Interpreter.cpp
++++ b/pcsx2/Interpreter.cpp
+@@ -8,6 +8,7 @@
+ #include "Cache.h"
+ 
+ #include "DebugTools/Breakpoints.h"
++#include "DebugTools/GifTrace.h"
+ 
+ #include "common/FastJmp.h"
+ 
+@@ -172,6 +173,7 @@ static void execI()
+ #endif
+ 
+ 	const u32 pc = cpuRegs.pc;
++	GifTrace::OnExec(pc);
+ 	// We need to increase the pc before executing the memRead32. An exception could appears
+ 	// and it expects the PC counter to be pre-incremented
+ 	cpuRegs.pc += 4;
 diff --git a/pcsx2/MTGS.cpp b/pcsx2/MTGS.cpp
 index 59f5aa0..29a9c97 100644
 --- a/pcsx2/MTGS.cpp

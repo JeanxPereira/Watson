@@ -53,6 +53,14 @@ EDITS = {
         ('\ts_GSRegistersWritten = false;\n\tMTGS::PostVsyncStart(registers_written);\n',
          '\ts_GSRegistersWritten = false;\n\tGifTrace::OnVsync();\n\tMTGS::PostVsyncStart(registers_written);\n'),
     ],
+    # The probe hook: the EE interpreter reports each instruction it is about to execute.
+    "pcsx2/Interpreter.cpp": [
+        ('#include "DebugTools/Breakpoints.h"\n',
+         '#include "DebugTools/Breakpoints.h"\n#include "DebugTools/GifTrace.h"\n'),
+        ('\tconst u32 pc = cpuRegs.pc;\n\t// We need to increase the pc before executing the memRead32.',
+         '\tconst u32 pc = cpuRegs.pc;\n\tGifTrace::OnExec(pc);\n'
+         '\t// We need to increase the pc before executing the memRead32.'),
+    ],
     "pcsx2/Gif.cpp": [
         ('void dmaGIF()\n{\n', 'void dmaGIF()\n{\n\tGifTrace::OnOrigin(2);\n'),
     ],

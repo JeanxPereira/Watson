@@ -964,7 +964,7 @@ namespace DebugServer
 			const std::string path = wirePath(params, "path");
 			if (path.empty())
 				return errorReply("path is required");
-			const std::string refused = GifTrace::Start(path);
+			const std::string refused = GifTrace::Start(path, getStr(params, "probes", ""));
 			if (!refused.empty())
 				return errorReply(refused);
 			j.startObject();

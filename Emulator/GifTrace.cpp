@@ -12,13 +12,33 @@
 #include "VUmicro.h"
 #include "common/FileSystem.h"
 
+#include <algorithm>
 #include <cstdarg>
 #include <cstdio>
+#include <cstring>
 #include <thread>
+#include <vector>
 
 namespace GifTrace
 {
 	bool g_active = false;
+	bool g_probing = false;
+
+	// A range of memory to record at a probe: `length` bytes at base + offset, where base is a
+	// register (or zero for an absolute address), or at the pointer stored there.
+	struct ProbeRange
+	{
+		bool deref;
+		int reg;
+		u32 offset;
+		u32 length;
+	};
+	struct ProbePoint
+	{
+		u32 pc;
+		std::vector<ProbeRange> ranges;
+	};
+	static std::vector<ProbePoint> s_probes;
 
 	static std::FILE* s_file = nullptr;
 	static std::thread::id s_thread;
@@ -34,6 +54,7 @@ namespace GifTrace
 		if (s_error.empty())
 			s_error = why;
 		g_active = false;
+		g_probing = false;
 	}
 
 	static bool onCpuThread()
@@ -126,7 +147,197 @@ namespace GifTrace
 		return !CHECK_EEREC && !REC_VU1;
 	}
 
-	std::string Start(const std::string& path)
+	static const char* const s_registerNames[32] = {
+		"zero", "at", "v0", "v1", "a0", "a1", "a2", "a3", "t0", "t1", "t2", "t3", "t4", "t5", "t6", "t7",
+		"s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "t8", "t9", "k0", "k1", "gp", "sp", "s8", "ra"};
+
+	static bool parseHex(const std::string& text, u32* value)
+	{
+		if (text.empty() || text.size() > 10)
+			return false;
+		size_t at = 0;
+		if (text.size() > 2 && text[0] == '0' && (text[1] == 'x' || text[1] == 'X'))
+			at = 2;
+		if (at == text.size())
+			return false;
+		u32 result = 0;
+		for (; at < text.size(); at++)
+		{
+			const char c = text[at];
+			u32 digit;
+			if (c >= '0' && c <= '9') digit = c - '0';
+			else if (c >= 'a' && c <= 'f') digit = c - 'a' + 10;
+			else if (c >= 'A' && c <= 'F') digit = c - 'A' + 10;
+			else return false;
+			if (result > 0x0fffffffu)
+				return false;
+			result = (result << 4) | digit;
+		}
+		*value = result;
+		return true;
+	}
+
+	static std::vector<std::string> split(const std::string& text, char separator)
+	{
+		std::vector<std::string> parts;
+		size_t start = 0;
+		while (start <= text.size())
+		{
+			size_t end = text.find(separator, start);
+			if (end == std::string::npos)
+				end = text.size();
+			parts.push_back(text.substr(start, end - start));
+			start = end + 1;
+		}
+		return parts;
+	}
+
+	static constexpr size_t MAX_POINTS = 32;
+	static constexpr size_t MAX_RANGES = 8;
+	static constexpr u32 MAX_LENGTH = 0x4000;
+
+	// Returns an empty string and fills `out`, or the reason the text is refused.
+	static std::string parseProbes(const std::string& text, std::vector<ProbePoint>* out)
+	{
+		out->clear();
+		if (text.empty())
+			return {};
+		for (const std::string& part : split(text, ';'))
+		{
+			const auto bad = [&part](const char* why) { return "bad probe \"" + part + "\": " + why; };
+			const size_t equals = part.find('=');
+			ProbePoint point;
+			if (!parseHex(part.substr(0, equals), &point.pc))
+				return bad("the program counter is not a hex number");
+			if (equals != std::string::npos)
+			{
+				for (const std::string& item : split(part.substr(equals + 1), ','))
+				{
+					ProbeRange range{};
+					std::string rest = item;
+					if (!rest.empty() && rest[0] == '*')
+					{
+						range.deref = true;
+						rest = rest.substr(1);
+					}
+					const size_t colon = rest.find(':');
+					if (colon == std::string::npos)
+						return bad("a range needs \":length\"");
+					if (!parseHex(rest.substr(colon + 1), &range.length) || range.length == 0 || range.length > MAX_LENGTH)
+						return bad("a length must be hex, between 1 and 0x4000");
+					std::string base = rest.substr(0, colon);
+					const size_t plus = base.find('+');
+					if (plus != std::string::npos)
+					{
+						if (!parseHex(base.substr(plus + 1), &range.offset))
+							return bad("an offset is not a hex number");
+						base = base.substr(0, plus);
+					}
+					range.reg = -1;
+					for (int index = 0; index < 32; index++)
+					{
+						if (base == s_registerNames[index])
+							range.reg = index;
+					}
+					if (range.reg < 0)
+					{
+						u32 absolute = 0;
+						if (plus != std::string::npos || !parseHex(base, &absolute))
+							return bad("a base is neither a register name nor a hex address");
+						range.reg = 0;
+						range.offset = absolute;
+					}
+					if (point.ranges.size() == MAX_RANGES)
+						return bad("more than 8 ranges");
+					point.ranges.push_back(range);
+				}
+			}
+			for (const ProbePoint& other : *out)
+			{
+				if (other.pc == point.pc)
+					return bad("this program counter is given twice");
+			}
+			if (out->size() == MAX_POINTS)
+				return bad("more than 32 probes");
+			out->push_back(std::move(point));
+		}
+		std::sort(out->begin(), out->end(), [](const ProbePoint& a, const ProbePoint& b) { return a.pc < b.pc; });
+		return {};
+	}
+
+	// Guest memory a probe may read: EE RAM through any of its segments, and the scratchpad.
+	static const u8* guest(u32 address, u32 length)
+	{
+		if (address >= 0x70000000u && address < 0x70000000u + Ps2MemSize::Scratch)
+		{
+			const u32 at = address - 0x70000000u;
+			return at + length <= Ps2MemSize::Scratch ? eeMem->Scratch + at : nullptr;
+		}
+		const u32 physical = address >= 0x80000000u ? (address & 0x1fffffffu) : address;
+		if (physical < Ps2MemSize::MainRam && length <= Ps2MemSize::MainRam - physical)
+			return eeMem->Main + physical;
+		return nullptr;
+	}
+
+	static void appendHex(const u8* mem, u32 size)
+	{
+		static const char digits[] = "0123456789abcdef";
+		const size_t at = s_line.size();
+		s_line.resize(at + static_cast<size_t>(size) * 2);
+		for (u32 index = 0; index < size; index++)
+		{
+			s_line[at + index * 2] = digits[mem[index] >> 4];
+			s_line[at + index * 2 + 1] = digits[mem[index] & 15];
+		}
+	}
+
+	void Exec(u32 pc)
+	{
+		const auto found = std::lower_bound(s_probes.begin(), s_probes.end(), pc,
+			[](const ProbePoint& point, u32 value) { return point.pc < value; });
+		if (found == s_probes.end() || found->pc != pc)
+			return;
+		if (!onCpuThread())
+			return;
+		appendf("{\"type\":\"probe\",\"pc\":\"0x%08x\",\"frame\":%u,\"gpr\":\"", pc, g_FrameCount);
+		for (int index = 0; index < 32; index++)
+			appendf("%08x", cpuRegs.GPR.r[index].UL[0]);
+		s_line += "\",\"fpr\":\"";
+		for (int index = 0; index < 32; index++)
+			appendf("%08x", fpuRegs.fpr[index].UL);
+		s_line += "\",\"mem\":[";
+		bool first = true;
+		for (const ProbeRange& range : found->ranges)
+		{
+			u32 address = cpuRegs.GPR.r[range.reg].UL[0] + range.offset;
+			bool readable = true;
+			if (range.deref)
+			{
+				const u8* pointer = guest(address, 4);
+				readable = pointer != nullptr;
+				if (readable)
+					std::memcpy(&address, pointer, 4);
+			}
+			const u8* mem = readable ? guest(address, range.length) : nullptr;
+			if (!first)
+				s_line += ',';
+			first = false;
+			if (mem)
+			{
+				appendf("{\"address\":%u,\"hex\":\"", address);
+				appendHex(mem, range.length);
+				s_line += "\"}";
+			}
+			else
+			{
+				appendf("{\"address\":%u,\"error\":\"not readable\"}", readable ? address : 0u);
+			}
+		}
+		s_line += "]}";
+		flushLine();
+	}
+
+	std::string Start(const std::string& path, const std::string& probes)
 	{
 		if (s_file)
 			return "a trace is already being recorded";
@@ -134,9 +345,14 @@ namespace GifTrace
 			return "the EE recompiler is on, and under it the EE registers are not current when data is sent; launch with the interpreter option";
 		if (REC_VU1)
 			return "the VU1 recompiler is on, and under it the VU1 program counter is not current; launch with the interpreter option";
+		std::vector<ProbePoint> points;
+		const std::string refused = parseProbes(probes, &points);
+		if (!refused.empty())
+			return refused;
 		s_file = FileSystem::OpenCFile(path.c_str(), "wb");
 		if (!s_file)
 			return "cannot open " + path;
+		s_probes = std::move(points);
 
 		s_thread = std::this_thread::get_id();
 		s_error.clear();
@@ -164,6 +380,7 @@ namespace GifTrace
 			return s_error;
 		}
 		g_active = true;
+		g_probing = !s_probes.empty();
 		return {};
 	}
 
@@ -172,6 +389,7 @@ namespace GifTrace
 		if (!s_file)
 			return "no trace is being recorded";
 		g_active = false;
+		g_probing = false;
 		if (s_error.empty())
 		{
 			appendf("{\"type\":\"end\",\"packets\":%llu}", static_cast<unsigned long long>(s_packets));
@@ -250,15 +468,8 @@ namespace GifTrace
 	{
 		if (!onCpuThread() || size == 0)
 			return;
-		static const char digits[] = "0123456789abcdef";
 		appendf("{\"type\":\"packet\",\"path\":%u,\"size\":%u,\"pending\":%u,\"hex\":\"", path + 1, size, pending);
-		const size_t at = s_line.size();
-		s_line.resize(at + static_cast<size_t>(size) * 2);
-		for (u32 index = 0; index < size; index++)
-		{
-			s_line[at + index * 2] = digits[mem[index] >> 4];
-			s_line[at + index * 2 + 1] = digits[mem[index] & 15];
-		}
+		appendHex(mem, size);
 		s_line += "\"}";
 		flushLine();
 		s_packets++;

@@ -202,3 +202,18 @@ test('launch passes -Interpreter only when asked', async () => {
   assert.ok(seen[0].includes('-Interpreter'));
   assert.ok(!seen[1].includes('-Interpreter'));
 });
+
+test('launch keeps the window out of the way unless it is asked to show it', async () => {
+  const dir = root();
+  const seen = [];
+  const host = {
+    async run(_file, args) { seen.push(args); return { code: 0, output: 'pcsx2 pid 4242\n' }; },
+    async processPath() { return null; },
+    async isRunning() { return true; },
+    async terminate() {},
+  };
+  await launch(host, dir, { bios: 'b.bin', visible: true });
+  await launch(host, dir, { bios: 'b.bin' });
+  assert.ok(seen[0].includes('-Visible'));
+  assert.ok(!seen[1].includes('-Visible'));
+});

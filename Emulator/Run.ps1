@@ -1,5 +1,5 @@
 #requires -Version 7
-param([string]$Bios, [string]$Elf, [string]$State, [switch]$Interpreter)
+param([string]$Bios, [string]$Elf, [string]$State, [switch]$Interpreter, [switch]$Visible)
 
 $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent $PSScriptRoot
@@ -73,5 +73,39 @@ if ($State) {
     $Arguments += @('-statefile', "`"$($StateFile.FullName)`"")
 }
 
-$Started = Start-Process -FilePath $Exe -ArgumentList $Arguments -PassThru
-Write-Host "pcsx2 pid $($Started.Id)"
+if ($Visible) {
+    $Started = Start-Process -FilePath $Exe -ArgumentList $Arguments -PassThru
+    Write-Host "pcsx2 pid $($Started.Id)"
+    exit 0
+}
+
+# Start-Process can minimize a window but not keep it from taking the focus; CreateProcess can.
+Add-Type -Namespace Watson -Name Native -MemberDefinition @'
+[StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+public struct STARTUPINFO {
+    public int cb; public string lpReserved; public string lpDesktop; public string lpTitle;
+    public int dwX; public int dwY; public int dwXSize; public int dwYSize;
+    public int dwXCountChars; public int dwYCountChars; public int dwFillAttribute;
+    public int dwFlags; public short wShowWindow; public short cbReserved2;
+    public IntPtr lpReserved2; public IntPtr hStdInput; public IntPtr hStdOutput; public IntPtr hStdError;
+}
+[StructLayout(LayoutKind.Sequential)]
+public struct PROCESS_INFORMATION { public IntPtr hProcess; public IntPtr hThread; public int dwProcessId; public int dwThreadId; }
+[DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+public static extern bool CreateProcessW(string application, System.Text.StringBuilder commandLine, IntPtr processAttributes,
+    IntPtr threadAttributes, bool inheritHandles, int creationFlags, IntPtr environment, string currentDirectory,
+    ref STARTUPINFO startupInfo, out PROCESS_INFORMATION processInformation);
+[DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr handle);
+'@
+$Startup = New-Object Watson.Native+STARTUPINFO
+$Startup.cb = [System.Runtime.InteropServices.Marshal]::SizeOf($Startup)
+$Startup.dwFlags = 1          # STARTF_USESHOWWINDOW
+$Startup.wShowWindow = 7      # SW_SHOWMINNOACTIVE
+$CommandLine = [System.Text.StringBuilder]::new("`"$Exe`" $($Arguments -join ' ')")
+$Information = New-Object Watson.Native+PROCESS_INFORMATION
+if (-not [Watson.Native]::CreateProcessW($Exe, $CommandLine, [IntPtr]::Zero, [IntPtr]::Zero, $false, 0, [IntPtr]::Zero, [NullString]::Value, [ref]$Startup, [ref]$Information)) {
+    Fail "CreateProcess failed with error $([System.Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+}
+[Watson.Native]::CloseHandle($Information.hThread) | Out-Null
+[Watson.Native]::CloseHandle($Information.hProcess) | Out-Null
+Write-Host "pcsx2 pid $($Information.dwProcessId)"

@@ -580,12 +580,13 @@ server.tool('watson_clear_all_breakpoints', 'Clear ALL breakpoints and watchpoin
 //  Lifecycle
 // ==========================================================
 server.tool('watson_launch',
-  'Start the Watson PCSX2 and connect to it. Prefer build + state by name from watson.json (see watson_states), e.g. build "rom-0230A", state "clock". Files can be given instead: bios, elf, and state as a .p2s path.',
+  'Start the Watson PCSX2 and connect to it. Prefer build + state by name from watson.json (see watson_states), e.g. build "rom-0230A", state "clock". Files can be given instead: bios, elf, and state as a .p2s path. Set interpreter to trace GIF packets.',
   {
     build: z.string().optional().describe('Build id from watson.json'),
     state: z.string().optional().describe('State name within the build, or a .p2s file path'),
     bios: z.string().optional(),
     elf: z.string().optional(),
+    interpreter: z.boolean().default(false).describe('Run the EE and VU interpreters instead of the recompilers. Slow; needed by watson_gif_trace.'),
   },
   async (request) => {
     try {
@@ -599,7 +600,7 @@ server.tool('watson_launch',
       debugServer = null;
       let started;
       try {
-        started = await launchAndWait(systemHost, WATSON_ROOT, { bios, elf, state }, probe,
+        started = await launchAndWait(systemHost, WATSON_ROOT, { bios, elf, state, interpreter: request.interpreter }, probe,
           { timeoutMs: 60000, intervalMs: 500, logTail: emulatorLogTail });
       } catch (error) {
         current()?.disconnect();
@@ -722,15 +723,16 @@ server.tool('watson_gsdump_parse',
     path: z.string().describe('Absolute path of an uncompressed .gs dump'),
     out: z.string().optional().describe('Where to write the JSON Lines; default is the dump path with .jsonl'),
     writes: z.boolean().default(false).describe('Also record every GIF tag and register write, in arrival order (about 1 MB more per frame)'),
+    trace: z.string().optional().describe('A GIF trace of the same capture (from watson_gif_trace): each draw then names the path, source address and EE origin of its data'),
   },
-  async ({ path: file, out, writes }) => {
+  async ({ path: file, out, writes, trace }) => {
     const target = out ?? file.replace(/\.gs$/i, '') + '.jsonl';
     const walk = walkGsDump(file);
     if (!walk.complete) {
       return { content: [{ type: 'text' as const, text: `dump: ${file}\nbuild: unknown\nverdict: NOT VERIFIED ${walk.reason}  coverage ${walk.packets}/?` }], isError: true };
     }
     try {
-      return text(formatSummary(parseGsDump(file, target, { writes }), file, target));
+      return text(formatSummary(parseGsDump(file, target, { writes, trace }), file, target));
     } catch (e: any) {
       return { content: [{ type: 'text' as const, text: `dump: ${file}\nbuild: unknown\nverdict: PARTIAL ${e.message}  coverage ?/${walk.packets}` }], isError: true };
     }

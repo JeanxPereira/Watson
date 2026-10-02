@@ -1,5 +1,5 @@
 #requires -Version 7
-param([string]$Bios, [string]$Elf, [string]$State)
+param([string]$Bios, [string]$Elf, [string]$State, [switch]$Interpreter)
 
 $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent $PSScriptRoot
@@ -49,6 +49,9 @@ Set-IniValue $Ini 'EmuCore' 'EnablePINE' 'true'
 Set-IniValue $Ini 'EmuCore/GS' 'Renderer' '13'
 Set-IniValue $Ini 'EmuCore/GS' 'GSDumpCompression' '0'
 Set-IniValue $Ini 'EmuCore/GS' 'ScreenshotSize' '2'
+# The GIF trace needs the interpreters; every other launch puts the recompilers back.
+$Recompile = if ($Interpreter) { 'false' } else { 'true' }
+foreach ($Key in 'EnableEE', 'EnableVU0', 'EnableVU1') { Set-IniValue $Ini 'EmuCore/CPU/Recompiler' $Key $Recompile }
 
 $Arguments = @('-datapath', "`"$Runtime`"")
 if ($Bios) {

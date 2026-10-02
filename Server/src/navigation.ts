@@ -93,3 +93,29 @@ export async function takeGsDump(emulator: Emulator, path: string, frames: numbe
   }
   throw new Error(`the dump at ${dump} is not complete after ${ran} frames: ${reason}`);
 }
+
+export interface Tracer extends Emulator {
+  gifTraceStart(path: string): Promise<void>;
+  gifTraceStop(): Promise<number>;
+}
+
+/**
+ * Trace and dump the same frames. The trace is armed first, while the VM is paused, so both
+ * instruments see the same vsync first; it is stopped only after the dump is closed, so it
+ * covers every packet the dump holds.
+ */
+export async function takeGifTrace(emulator: Tracer, path: string, frames: number): Promise<{ png: string; dump: string; trace: string }> {
+  const trace = path.replace(/\.png$/i, '.trace.jsonl');
+  fs.rmSync(trace, { force: true });
+  await emulator.gifTraceStart(trace);
+  let files: { png: string; dump: string };
+  try {
+    files = await takeGsDump(emulator, path, frames);
+  } catch (error) {
+    // The reason the dump failed is the one worth reporting.
+    await emulator.gifTraceStop().catch(() => undefined);
+    throw error;
+  }
+  await emulator.gifTraceStop();
+  return { ...files, trace };
+}

@@ -179,7 +179,7 @@ export class DebugServerClient {
         this.pendingReject = null;
         reject(new Error(`Command timeout: ${cmd.cmd}`));
         this.socket?.destroy();
-      }, cmd.cmd === 'frame_advance' ? 10000 + cmd.frames * 100 : 10000);
+      }, cmd.cmd === 'frame_advance' ? 10000 + cmd.frames * 2000 : 10000);
       const settleResolve = (data: any) => { clearTimeout(timer); resolve(data); };
       const settleReject = (err: Error) => { clearTimeout(timer); reject(err); };
 
@@ -199,7 +199,7 @@ export class DebugServerClient {
 
   // ===== Status =====
 
-  async getStatus(cpu: CpuTarget = 'ee'): Promise<{ alive: boolean; paused: boolean; pc: string; cycles: number; frame: number }> {
+  async getStatus(cpu: CpuTarget = 'ee'): Promise<{ alive: boolean; paused: boolean; pc: string; cycles: number; frame: number; interpreter: boolean }> {
     const resp = await this.send({ cmd: 'status', cpu });
     if (!resp.ok) throw new Error(resp.error);
     return resp.data;
@@ -226,6 +226,19 @@ export class DebugServerClient {
   async queueSnapshot(path: string, dumpFrames: number): Promise<void> {
     const resp = await this.send({ cmd: 'queue_snapshot', path: DebugServerClient.wirePath(path), dump_frames: dumpFrames });
     if (!resp.ok) throw new Error(resp.error);
+  }
+
+  /** Start recording GIF packets and their origins to `path`. Needs the interpreters. */
+  async gifTraceStart(path: string): Promise<void> {
+    const resp = await this.send({ cmd: 'gif_trace_start', path: DebugServerClient.wirePath(path) });
+    if (!resp.ok) throw new Error(resp.error);
+  }
+
+  /** Stop the trace and close its file. Returns the packets recorded. */
+  async gifTraceStop(): Promise<number> {
+    const resp = await this.send({ cmd: 'gif_trace_stop' });
+    if (!resp.ok) throw new Error(resp.error);
+    return resp.packets;
   }
 
   async saveStateFile(path: string): Promise<void> {

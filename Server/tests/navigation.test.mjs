@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { pressPad, waitForStableFile, takeSnapshot, takeGsDump } from '../dist/navigation.js';
+import { pressPad, waitForStableFile, takeSnapshot, takeGsDump, takeGifTrace } from '../dist/navigation.js';
 
 function recorder(onQueue = () => {}) {
   const calls = [];
@@ -129,4 +129,52 @@ test('pressPad reports why advancing failed even when the release fails too', as
   emulator.padSet = async (_buttons, value) => { if (value === 0) { releases += 1; throw new Error('not connected'); } };
   await assert.rejects(pressPad(emulator, ['start'], 2), /connection closed/);
   assert.equal(releases, 1);
+});
+
+function tracer(onQueue) {
+  const emulator = recorder(onQueue);
+  emulator.gifTraceStart = async (file) => { emulator.calls.push(['gifTraceStart', path.basename(file)]); };
+  emulator.gifTraceStop = async () => { emulator.calls.push(['gifTraceStop']); return 7; };
+  return emulator;
+}
+const completeDump = (queued) => {
+  fs.writeFileSync(queued, 'png-bytes');
+  fs.writeFileSync(queued.replace(/\.png$/, '.gs'), dumpBytes());
+};
+
+test('takeGifTrace starts the trace before the dump is queued and stops it after the dump is complete', async () => {
+  const emulator = tracer(completeDump);
+  const png = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'watson-trace-')), 'shot.png');
+  const files = await takeGifTrace(emulator, png, 1);
+  assert.equal(path.basename(files.trace), 'shot.trace.jsonl');
+  assert.equal(files.dump, png.replace(/\.png$/, '.gs'));
+  assert.deepEqual(emulator.calls[0], ['gifTraceStart', 'shot.trace.jsonl']);
+  assert.deepEqual(emulator.calls[1], ['queueSnapshot', 'shot.png', 1]);
+  assert.deepEqual(emulator.calls.at(-1), ['gifTraceStop']);
+  assert.equal(emulator.calls.filter((call) => call[0] === 'gifTraceStop').length, 1);
+});
+
+test('takeGifTrace stops the trace when the dump fails, and reports the dump failure', async () => {
+  const emulator = tracer(() => {});
+  let stopped = 0;
+  emulator.gifTraceStop = async () => { stopped += 1; throw new Error('stop failed too'); };
+  const png = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'watson-trace-')), 'shot.png');
+  await assert.rejects(takeGifTrace(emulator, png, 1), /is not complete/);
+  assert.equal(stopped, 1);
+});
+
+test('takeGifTrace queues nothing when the trace is refused', async () => {
+  const emulator = tracer(() => {});
+  emulator.gifTraceStart = async () => { throw new Error('the EE recompiler is on'); };
+  await assert.rejects(takeGifTrace(emulator, path.join(os.tmpdir(), 'never.png'), 1), /recompiler/);
+  assert.deepEqual(emulator.calls, []);
+});
+
+test('takeGifTrace removes a trace left by an earlier capture before it starts', async () => {
+  const emulator = tracer(completeDump);
+  const png = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'watson-trace-')), 'shot.png');
+  const stale = png.replace(/\.png$/, '.trace.jsonl');
+  fs.writeFileSync(stale, 'old');
+  emulator.gifTraceStart = async () => { assert.equal(fs.existsSync(stale), false); };
+  await takeGifTrace(emulator, png, 1);
 });

@@ -55,3 +55,16 @@ test('hex64 pads to sixteen digits', () => {
   assert.equal(hex64(0x44n), '0x0000000000000044');
   assert.equal(hex64(0xffffffffffffffffn), '0xffffffffffffffff');
 });
+
+test('TEX1.K is a signed twelve-bit value', () => {
+  assert.equal(decodeRegister('TEX1_1', 0xff0n << 32n).K, -16);
+  assert.equal(decodeRegister('TEX1_1', 0x010n << 32n).K, 16);
+});
+
+test('ZBUF.PSM is six bits wide', () => {
+  assert.equal(decodeRegister('ZBUF_1', 0x3000008cn).PSM, 0x30);
+});
+
+test('0x11 is named RGBAQ', () => {
+  assert.equal(registerName(0x11), 'RGBAQ');
+});

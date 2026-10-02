@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { parseGsDump, formatSummary, describeAlpha } from '../dist/gs/parse.js';
 import { REG } from '../dist/gs/registers.js';
 
@@ -74,7 +75,7 @@ test('a dump parses into a header, the initial state, its draws and a frame reco
   assert.deepEqual(records[2].bbox, [0, 0, 10, 10]);
   assert.equal(records[2].state.ALPHA, '0x0000000000000044');
   assert.deepEqual(records[2].decoded.ALPHA, { A: 0, B: 1, C: 0, D: 1, FIX: 0 });
-  assert.deepEqual(records[3], { type: 'frame', index: 0, draws: 1, primitives: 2 });
+  assert.deepEqual(records[3], { type: 'frame', index: 0, field: 0, draws: 1, primitives: 2 });
 });
 
 test('a write to an unknown register is counted by number and parsing goes on', () => {
@@ -120,4 +121,96 @@ test('the summary text ends with the build and verdict lines', () => {
   const text = formatSummary(parseGsDump(file, out), file, out).trimEnd().split('\n');
   assert.equal(text.at(-2), 'build: unknown');
   assert.match(text.at(-1), /^verdict: FOUND 1 {2}coverage \d+\/\d+$/);
+});
+
+test('the output is never the dump itself', () => {
+  const bytes = dump(SCENE);
+  const { file } = write(bytes);
+  assert.throws(() => parseGsDump(file, file), /would overwrite the dump/);
+  assert.equal(fs.readFileSync(file).length, bytes.length);
+});
+
+test('a refused parse removes an output left by an earlier run and leaves no temporary file', () => {
+  const whole = dump(SCENE);
+  const { file, out } = write(whole.subarray(0, whole.length - 3000));
+  fs.writeFileSync(out, 'stale');
+  assert.throws(() => parseGsDump(file, out));
+  assert.equal(fs.existsSync(out), false);
+  assert.equal(fs.existsSync(out + '.tmp'), false);
+});
+
+test('a draw, a transfer and a draw come out in that order', () => {
+  const sprite = [tag({ nloop: 2, regs: [5] }), packedXyz(0, 0), packedXyz(8, 8)];
+  const gif = [
+    tag({ nloop: 1, regs: [0xe] }), aPlusD(REG.PRIM, 0x6n), ...sprite,
+    tag({ nloop: 1, regs: [0xe] }), aPlusD(REG.TRXDIR, 2n), ...sprite,
+  ];
+  const { file, out } = write(dump(gif));
+  parseGsDump(file, out);
+  assert.deepEqual(lines(out).map((r) => r.type), ['header', 'state', 'draw', 'transfer', 'draw', 'frame']);
+});
+
+test('with writes on, tags and register writes are recorded in arrival order', () => {
+  const { file, out } = write(dump(SCENE));
+  parseGsDump(file, out, { writes: true });
+  const records = lines(out);
+  assert.deepEqual(records.filter((r) => r.type === 'tag').map((r) => [r.path, r.nloop, r.flg]), [[2, 3, 0], [2, 4, 0]]);
+  const written = records.filter((r) => r.type === 'write');
+  assert.equal(written.length, 7);
+  assert.deepEqual(written.slice(0, 3).map((r) => [r.reg, r.value]), [
+    ['PRIM', '0x0000000000000044'], ['ALPHA_1', '0x0000000000000044'], ['FRAME_1', '0x00000000000a0000'],
+  ]);
+  assert.equal(records.findIndex((r) => r.type === 'write'), records.findIndex((r) => r.type === 'tag') + 1);
+});
+
+test('the frame record carries the vsync field', () => {
+  const { file, out } = write(dump(SCENE));
+  parseGsDump(file, out);
+  assert.equal(lines(out).at(-1).field, 0);
+});
+
+test('many frames parse and leave no temporary file', () => {
+  const blob = stateBlob();
+  const body = Buffer.concat(SCENE);
+  const frame = Buffer.concat([Buffer.from([0, 2]), u32(body.length), body, Buffer.from([3]), Buffer.alloc(8192), Buffer.from([1, 0])]);
+  const many = Buffer.concat([u32(0xFFFFFFFF, 36), u32(9, blob.length, 36, 0, 0, 0, 0, 36, 0), blob, Buffer.alloc(8192), ...Array(300).fill(frame)]);
+  const { file, out } = write(many);
+  const summary = parseGsDump(file, out);
+  assert.equal(summary.frames, 300);
+  assert.equal(lines(out).filter((r) => r.type === 'frame').length, 300);
+  assert.equal(fs.existsSync(out + '.tmp'), false);
+});
+
+test('a summary with no draws says EMPTY', () => {
+  const { file, out } = write(dump([tag({ nloop: 1, regs: [0xe] }), aPlusD(REG.DTHE, 1n)]));
+  const text = formatSummary(parseGsDump(file, out), file, out).trimEnd().split(String.fromCharCode(10));
+  assert.match(text.at(-1), /^verdict: EMPTY {2}coverage/);
+});
+
+const CLI = path.resolve('dist', 'cli.js');
+const run = (...args) => spawnSync(process.execPath, [CLI, ...args], { encoding: 'utf8' });
+
+test('the CLI refuses --out with no value and writes nothing', () => {
+  const { file, out } = write(dump(SCENE));
+  const result = run('parse', file, '--out');
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /--out needs a file/);
+  assert.equal(fs.existsSync(out), false);
+});
+
+test('the CLI answers a truncated dump with NOT VERIFIED and exit 2', () => {
+  const whole = dump(SCENE);
+  const { file } = write(whole.subarray(0, whole.length - 3000));
+  const result = run('parse', file);
+  assert.equal(result.status, 2);
+  assert.match(result.stdout, /build: unknown/);
+  assert.match(result.stdout, /verdict: NOT VERIFIED .*more bytes/);
+});
+
+test('the CLI parses a dump and exits 0', () => {
+  const { file, out } = write(dump(SCENE));
+  const result = run('parse', file);
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /verdict: FOUND 1/);
+  assert.equal(fs.existsSync(out), true);
 });

@@ -59,6 +59,13 @@ export class DrawAssembler {
     this.state.write(reg, value);
     this.key = null;
     if (reg === REG.PRIM) this.queue = [];
+    // A transfer reads or writes VRAM: what is drawn after it is not the same draw as before.
+    if (reg === REG.TRXDIR) this.close();
+  }
+
+  /** Vertices waiting in the queue for their primitive to complete. */
+  get queued(): number {
+    return this.queue.length;
   }
 
   endFrame(): void {
@@ -88,8 +95,12 @@ export class DrawAssembler {
     const prim = Number(this.state.effectivePrim());
     const type = prim & 7;
     const context = ((prim >> 9) & 1) as 0 | 1;
+    // The GS drops a vertex kicked under the reserved primitive type.
+    if (SIZE[type] === 0) return;
     const withFog = reg === REG.XYZF2 || reg === REG.XYZF3;
     const position = decodeRegister(withFog ? 'XYZF2' : 'XYZ2', value);
+    // XYZF writes the fog register too, so a later XYZ kick inherits it.
+    if (withFog) this.state.write(REG.FOG, BigInt(position.F) << 56n);
     const offset = decodeRegister('XYOFFSET', this.state.get(`XYOFFSET_${context + 1}`));
     const colour = decodeRegister('RGBAQ', this.state.get('RGBAQ'));
     const st = decodeRegister('ST', this.state.get('ST'));
@@ -101,11 +112,11 @@ export class DrawAssembler {
       rgba: [colour.R, colour.G, colour.B, colour.A],
       q: colour.Q, s: st.S, t: st.T,
       u: uv.U / 16, v: uv.V / 16,
-      fog: withFog ? position.F : decodeRegister('FOG', this.state.get('FOG')).F,
+      fog: decodeRegister('FOG', this.state.get('FOG')).F,
     });
 
     const size = SIZE[type];
-    if (size === 0 || this.queue.length < size) return;
+    if (this.queue.length < size) return;
 
     const primitive = this.queue.slice(0, size);
     if (type === 2) this.queue = [primitive[1]];

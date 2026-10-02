@@ -63,14 +63,58 @@ test('a snapshot names context registers without their suffix', () => {
   }
 });
 
-test('PRMODE supplies the attributes only while PRMODECONT.AC is 0', () => {
+test('PRIM is one register: PRMODE merges into it only while PRMODECONT.AC is 0', () => {
   const state = GsState.empty();
+  state.write(REG.PRMODECONT, 1n);
   state.write(REG.PRIM, 0x15bn);
   state.write(REG.PRMODE, 0x040n);
-  state.write(REG.PRMODECONT, 1n);
-  assert.equal(state.effectivePrim(), 0x15bn);
+  assert.equal(state.effectivePrim(), 0x15bn, 'PRMODE is ignored while AC is 1');
   state.write(REG.PRMODECONT, 0n);
-  assert.equal(state.effectivePrim(), 0x043n);
+  assert.equal(state.effectivePrim(), 0x15bn, 'changing AC alone changes nothing');
+  state.write(REG.PRMODE, 0x040n);
+  assert.equal(state.effectivePrim(), 0x043n, 'PRMODE supplies the attributes, the type stays');
+  state.write(REG.PRIM, 0x7fen);
+  assert.equal(state.effectivePrim(), 0x046n, 'under AC 0 a PRIM write changes only the type');
+  state.write(REG.PRMODECONT, 1n);
+  assert.equal(state.effectivePrim(), 0x046n);
+});
+
+test('a blob with PRMODECONT.AC 0 keeps the PRIM attributes it was saved with', () => {
+  const state = GsState.fromBlob(blob({ globals: { PRIM: 0x15bn, PRMODECONT: 0n } }));
+  assert.equal(state.effectivePrim(), 0x15bn);
+});
+
+test('only the low eleven bits of a PRIM write count', () => {
+  const state = GsState.empty();
+  state.write(REG.PRIM, 0xdeadbeef00000006n);
+  assert.equal(state.effectivePrim(), 0x006n);
+});
+
+test('the vertex registers are read from the blob at their real offsets', () => {
+  const b = blob();
+  b.writeBigUInt64LE(0x3f800000_80402010n, 316);
+  b.writeBigUInt64LE(0x3f0000003e800000n, 324);
+  b.writeUInt32LE(0x02000100, 332);
+  b.writeUInt32LE(0x7f, 336);
+  b.writeFloatLE(0.5, b.length - 4);
+  const state = GsState.fromBlob(b);
+  assert.equal(state.get('RGBAQ'), 0x3f800000_80402010n);
+  assert.equal(state.get('ST'), 0x3f0000003e800000n);
+  assert.equal(state.get('UV'), 0x02000100n);
+  assert.equal(state.get('FOG'), 0x7fn << 56n);
+  assert.equal(state.q, 0x3f000000n);
+});
+
+test('address 0x11 is RGBAQ too', () => {
+  const state = GsState.empty();
+  state.write(0x11, 0x80402010n);
+  assert.equal(state.get('RGBAQ'), 0x80402010n);
+});
+
+test('a state blob of another version is refused', () => {
+  const b = blob();
+  b.writeUInt32LE(6, 0);
+  assert.throws(() => GsState.fromBlob(b), /state version 6/);
 });
 
 test('TEX2 changes only the pixel format and CLUT fields of TEX0', () => {

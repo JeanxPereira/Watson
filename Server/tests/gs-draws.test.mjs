@@ -151,3 +151,28 @@ test('endFrame closes the open draw and numbers the next frame', () => {
   assert.deepEqual(draws.take().map((d) => d.frame), [0, 1]);
   assert.deepEqual(draws.take(), []);
 });
+
+test('a transfer between two primitives of equal state ends the draw', () => {
+  const draws = assembler(6);
+  draws.apply(REG.XYZ2, xyz(0, 0));
+  draws.apply(REG.XYZ2, xyz(8, 8));
+  draws.apply(REG.TRXDIR, 0n);
+  draws.apply(REG.XYZ2, xyz(0, 0));
+  draws.apply(REG.XYZ2, xyz(8, 8));
+  assert.deepEqual(finish(draws).map((d) => d.primitives), [1, 1]);
+});
+
+test('an XYZF kick leaves its fog for a later XYZ kick', () => {
+  const draws = assembler(6);
+  draws.apply(REG.XYZF2, xyz(0, 0) & 0xffffffffffffffn | (0x40n << 56n));
+  draws.apply(REG.XYZ2, xyz(8, 8));
+  const [draw] = finish(draws);
+  assert.deepEqual(draw.vertices.map((v) => v.fog), [0x40, 0x40]);
+});
+
+test('primitive type 7 draws nothing and keeps no vertices', () => {
+  const draws = assembler(7);
+  for (let i = 0; i < 1000; i++) draws.apply(REG.XYZ2, xyz(i % 10, 0));
+  assert.deepEqual(finish(draws), []);
+  assert.equal(draws.queued, 0);
+});

@@ -18,6 +18,9 @@ export const REG = {
 } as const;
 
 const NAMES = new Map<number, string>(Object.entries(REG).map(([name, address]) => [address, name]));
+/** PCSX2 routes A+D address 0x11 to the RGBAQ handler as well. */
+export const RGBAQ_ALIAS = 0x11;
+NAMES.set(RGBAQ_ALIAS, 'RGBAQ');
 
 export function registerName(address: number): string {
   return NAMES.get(address) ?? `0x${address.toString(16).padStart(2, '0')}`;
@@ -27,7 +30,10 @@ export function hex64(value: bigint): string {
   return `0x${BigInt.asUintN(64, value).toString(16).padStart(16, '0')}`;
 }
 
-/** [field name, first bit, width]. A width of 0 marks an IEEE-754 single at that bit. */
+/**
+ * [field name, first bit, width]. A width of 0 marks an IEEE-754 single at that bit; a negative
+ * width marks a signed field of that many bits.
+ */
 type Field = readonly [string, number, number];
 
 const XYZ: Field[] = [['X', 0, 16], ['Y', 16, 16], ['Z', 32, 32]];
@@ -43,14 +49,14 @@ const LAYOUTS: Record<string, Field[]> = {
   XYZ2: XYZ, XYZ3: XYZ, XYZF2: XYZF, XYZF3: XYZF,
   FOG: [['F', 56, 8]],
   TEX0: [['TBP0', 0, 14], ['TBW', 14, 6], ['PSM', 20, 6], ['TW', 26, 4], ['TH', 30, 4], ['TCC', 34, 1], ['TFX', 35, 2], ['CBP', 37, 14], ['CPSM', 51, 4], ['CSM', 55, 1], ['CSA', 56, 5], ['CLD', 61, 3]],
-  TEX1: [['LCM', 0, 1], ['MXL', 2, 3], ['MMAG', 5, 1], ['MMIN', 6, 3], ['MTBA', 9, 1], ['L', 19, 2], ['K', 32, 12]],
+  TEX1: [['LCM', 0, 1], ['MXL', 2, 3], ['MMAG', 5, 1], ['MMIN', 6, 3], ['MTBA', 9, 1], ['L', 19, 2], ['K', 32, -12]],
   CLAMP: [['WMS', 0, 2], ['WMT', 2, 2], ['MINU', 4, 10], ['MAXU', 14, 10], ['MINV', 24, 10], ['MAXV', 34, 10]],
   XYOFFSET: [['OFX', 0, 16], ['OFY', 32, 16]],
   SCISSOR: [['SCAX0', 0, 11], ['SCAX1', 16, 11], ['SCAY0', 32, 11], ['SCAY1', 48, 11]],
   ALPHA: [['A', 0, 2], ['B', 2, 2], ['C', 4, 2], ['D', 6, 2], ['FIX', 32, 8]],
   TEST: [['ATE', 0, 1], ['ATST', 1, 3], ['AREF', 4, 8], ['AFAIL', 12, 2], ['DATE', 14, 1], ['DATM', 15, 1], ['ZTE', 16, 1], ['ZTST', 17, 2]],
   FRAME: [['FBP', 0, 9], ['FBW', 16, 6], ['PSM', 24, 6], ['FBMSK', 32, 32]],
-  ZBUF: [['ZBP', 0, 9], ['PSM', 24, 4], ['ZMSK', 32, 1]],
+  ZBUF: [['ZBP', 0, 9], ['PSM', 24, 6], ['ZMSK', 32, 1]],
   TEXA: [['TA0', 0, 8], ['AEM', 15, 1], ['TA1', 32, 8]],
   FOGCOL: [['FCR', 0, 8], ['FCG', 8, 8], ['FCB', 16, 8]],
   TEXCLUT: [['CBW', 0, 6], ['COU', 6, 6], ['COV', 12, 10]],
@@ -79,6 +85,8 @@ export function decodeRegister(name: string, value: bigint): Record<string, numb
   for (const [field, bit, width] of layout) {
     if (width === 0) {
       fields[field] = float32(Number((value >> BigInt(bit)) & 0xffffffffn));
+    } else if (width < 0) {
+      fields[field] = Number(BigInt.asIntN(-width, value >> BigInt(bit)));
     } else {
       fields[field] = Number((value >> BigInt(bit)) & ((1n << BigInt(width)) - 1n));
     }

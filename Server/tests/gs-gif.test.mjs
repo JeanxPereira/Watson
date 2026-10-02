@@ -131,3 +131,40 @@ test('a path resumed from saved state finishes the packet it was in, with no tag
   assert.deepEqual(events.map((e) => e.kind), ['write', 'write', 'write', 'tag', 'write']);
   assert.deepEqual(writes(events), [[REG.DTHE, 1n], [REG.PABE, 1n], [REG.FBA_1, 1n], [REG.COLCLAMP, 1n]]);
 });
+
+test('Q is 1.0 at the start of every tag, so a packed RGBAQ with no ST before it carries 1.0', () => {
+  const path = new GifPath();
+  const first = path.feed(Buffer.concat([tag({ nloop: 1, regs: [2, 1] }), qword(0n, 0x40000000n), qword(0x10n, 0n)]));
+  assert.deepEqual(writes(first)[1], [REG.RGBAQ, 0x40000000_00000010n]);
+  const second = path.feed(Buffer.concat([tag({ nloop: 1, regs: [1] }), qword(0x10n, 0n)]));
+  assert.deepEqual(writes(second), [[REG.RGBAQ, 0x3f800000_00000010n]]);
+});
+
+test('paths share one Q latch, seeded from the dump', () => {
+  const latch = { q: 0x3f000000n };
+  const saved = { tag: tag({ nloop: 1, regs: [1] }), reg: 0 };
+  const resumed = new GifPath(saved, latch).feed(qword(0x10n, 0n));
+  assert.deepEqual(writes(resumed), [[REG.RGBAQ, 0x3f000000_00000010n]]);
+  const a = new GifPath(undefined, latch);
+  const b = new GifPath(undefined, latch);
+  a.feed(Buffer.concat([tag({ nloop: 1, regs: [2] }), qword(0n, 0x40400000n)]));
+  assert.equal(latch.q, 0x40400000n);
+  b.feed(tag({ nloop: 1, regs: [1] }));
+  assert.equal(latch.q, 0x3f800000n);
+});
+
+test('a REGLIST path restored mid-packet pads by what is still owed', () => {
+  const next = Buffer.concat([tag({ nloop: 1, regs: [0xe] }), aPlusD(REG.PABE, 1n)]);
+  const evenOwed = new GifPath({ tag: tag({ nloop: 1, flg: 1, regs: [1, 2, 5] }), reg: 1 })
+    .feed(Buffer.concat([dword(0x22n), dword(0x33n), next]));
+  assert.deepEqual(writes(evenOwed), [[REG.ST, 0x22n], [REG.XYZ2, 0x33n], [REG.PABE, 1n]]);
+  const oddOwed = new GifPath({ tag: tag({ nloop: 2, flg: 1, regs: [1, 2, 5] }), reg: 1 })
+    .feed(Buffer.concat([dword(2n), dword(3n), dword(4n), dword(5n), dword(6n), dword(0xdeadn), next]));
+  assert.deepEqual(writes(oddOwed).map(([reg]) => reg), [REG.ST, REG.XYZ2, REG.RGBAQ, REG.ST, REG.XYZ2, REG.PABE]);
+});
+
+test('an IMAGE path restored mid-packet consumes what is owed', () => {
+  const events = new GifPath({ tag: tag({ nloop: 2, flg: 2, regs: [] }), reg: 0 })
+    .feed(Buffer.concat([Buffer.alloc(32, 7), tag({ nloop: 1, regs: [0xe] }), aPlusD(REG.DTHE, 1n)]));
+  assert.deepEqual(events.map((e) => e.kind), ['image', 'tag', 'write']);
+});

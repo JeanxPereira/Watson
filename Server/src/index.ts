@@ -17,6 +17,7 @@ import { fileURLToPath } from 'node:url';
 import { pressPad, takeSnapshot, takeGsDump } from './navigation.js';
 import { launchAndWait, reusingProbe, kill, systemHost } from './lifecycle.js';
 import { parseGsDump, formatSummary } from './gs/parse.js';
+import { walkGsDump } from './gsdump.js';
 import { findConfig, loadCatalog, resolveLaunch, registerState, describeStates, Catalog } from './catalog.js';
 
 // ===== State =====
@@ -717,13 +718,21 @@ server.tool('watson_load_state_file', 'Load the emulator state from a file.', { 
 // ==========================================================
 server.tool('watson_gsdump_parse',
   'Parse a GS dump (.gs) offline into JSON Lines: every draw with its primitive, vertices and register state, every upload and VRAM copy, per frame. Returns a summary: draws per frame, blend equations, frame targets, textures, tests. Needs no running emulator.',
-  { path: z.string().describe('Absolute path of an uncompressed .gs dump'), out: z.string().optional().describe('Where to write the JSON Lines; default is the dump path with .jsonl') },
-  async ({ path: file, out }) => {
+  {
+    path: z.string().describe('Absolute path of an uncompressed .gs dump'),
+    out: z.string().optional().describe('Where to write the JSON Lines; default is the dump path with .jsonl'),
+    writes: z.boolean().default(false).describe('Also record every GIF tag and register write, in arrival order (about 1 MB more per frame)'),
+  },
+  async ({ path: file, out, writes }) => {
+    const target = out ?? file.replace(/\.gs$/i, '') + '.jsonl';
+    const walk = walkGsDump(file);
+    if (!walk.complete) {
+      return { content: [{ type: 'text' as const, text: `dump: ${file}\nbuild: unknown\nverdict: NOT VERIFIED ${walk.reason}  coverage ${walk.packets}/?` }], isError: true };
+    }
     try {
-      const target = out ?? file.replace(/\.gs$/i, '') + '.jsonl';
-      return text(formatSummary(parseGsDump(file, target), file, target));
+      return text(formatSummary(parseGsDump(file, target, { writes }), file, target));
     } catch (e: any) {
-      return { content: [{ type: 'text' as const, text: `build: unknown\nverdict: NOT VERIFIED ${e.message}` }], isError: true };
+      return { content: [{ type: 'text' as const, text: `dump: ${file}\nbuild: unknown\nverdict: PARTIAL ${e.message}  coverage ?/${walk.packets}` }], isError: true };
     }
   }
 );

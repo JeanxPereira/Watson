@@ -14,6 +14,8 @@ export type GifEvent =
 
 const MASK64 = (1n << 64n) - 1n;
 const ADC = 1n << 47n;
+/** 1.0 as IEEE-754 bits. */
+const ONE = 0x3f800000n;
 
 interface Tag { nloop: number; eop: boolean; pre: boolean; prim: number; flg: number; nreg: number; regs: number[] }
 
@@ -42,11 +44,18 @@ export class GifPath {
   private index = 0;
   private imageBytes = 0;
   private padding = 0;
-  /** Q latched by the last packed ST; a packed RGBAQ carries it. */
-  private q = 0n;
+  /**
+   * Q as the GS latches it: set by a packed ST, carried by a packed RGBAQ, and reset to 1.0 at
+   * every tag that has data. The GS has one latch for all paths.
+   */
+  private latch: { q: bigint };
 
-  /** `saved` is a path as the dump's state blob stores it: mid-packet when its NLOOP is not 0. */
-  constructor(saved?: { tag: Buffer; reg: number }) {
+  /**
+   * `saved` is a path as the dump's state blob stores it: mid-packet when its NLOOP is not 0.
+   * `latch` is the Q latch to share with the other paths, seeded from the dump.
+   */
+  constructor(saved?: { tag: Buffer; reg: number }, latch: { q: bigint } = { q: ONE }) {
+    this.latch = latch;
     if (!saved) return;
     const tag = readTag(saved.tag);
     if (tag.nloop === 0) return;
@@ -57,7 +66,7 @@ export class GifPath {
     } else {
       this.index = saved.reg;
       this.remaining = tag.nloop * tag.nreg - saved.reg;
-      if (tag.flg === 1 && (tag.nloop * tag.nreg) % 2 === 1) this.padding = 8;
+      if (tag.flg === 1 && this.remaining % 2 === 1) this.padding = 8;
     }
   }
 
@@ -82,6 +91,7 @@ export class GifPath {
         events.push({ kind: 'tag', ...tag });
         if (tag.nloop === 0) continue;
         this.tag = tag;
+        this.latch.q = ONE;
         this.index = 0;
         if (tag.flg === 0) {
           this.remaining = tag.nloop * tag.nreg;
@@ -134,10 +144,10 @@ export class GifPath {
         write(REG.PRIM, lo & 0x7ffn);
         break;
       case 0x1:
-        write(REG.RGBAQ, (lo & 0xffn) | (((lo >> 32n) & 0xffn) << 8n) | ((hi & 0xffn) << 16n) | (((hi >> 32n) & 0xffn) << 24n) | (this.q << 32n));
+        write(REG.RGBAQ, (lo & 0xffn) | (((lo >> 32n) & 0xffn) << 8n) | ((hi & 0xffn) << 16n) | (((hi >> 32n) & 0xffn) << 24n) | (this.latch.q << 32n));
         break;
       case 0x2:
-        this.q = hi & 0xffffffffn;
+        this.latch.q = hi & 0xffffffffn;
         write(REG.ST, lo);
         break;
       case 0x3:

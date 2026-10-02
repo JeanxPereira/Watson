@@ -217,3 +217,18 @@ test('launch keeps the window out of the way unless it is asked to show it', asy
   assert.ok(seen[0].includes('-Visible'));
   assert.ok(!seen[1].includes('-Visible'));
 });
+
+test('launch passes the program arguments through, and nothing when there are none', async () => {
+  const dir = root();
+  const seen = [];
+  const host = {
+    async run(_file, args) { seen.push(args); return { code: 0, output: 'pcsx2 pid 4242\n' }; },
+    async processPath() { return null; },
+    async isRunning() { return true; },
+    async terminate() {},
+  };
+  await launch(host, dir, { elf: 'osd.elf', gameArgs: 'SkipSearchLater BootClock' });
+  await launch(host, dir, { elf: 'osd.elf' });
+  assert.deepEqual(seen[0].slice(seen[0].indexOf('-GameArgs')), ['-GameArgs', 'SkipSearchLater BootClock']);
+  assert.ok(!seen[1].includes('-GameArgs'));
+});

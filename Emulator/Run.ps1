@@ -1,5 +1,5 @@
 #requires -Version 7
-param([string]$Bios, [string]$Elf, [string]$State, [switch]$Interpreter, [switch]$Visible)
+param([string]$Bios, [string]$Elf, [string]$State, [switch]$Interpreter, [switch]$Visible, [string]$GameArgs)
 
 $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent $PSScriptRoot
@@ -67,6 +67,7 @@ if ($Elf) {
 } elseif ($Bios) {
     $Arguments += '-bios'
 }
+if ($GameArgs) { $Arguments += @('-gameargs', "`"$GameArgs`"") }
 if ($State) {
     $StateFile = Get-Item -LiteralPath $State -ErrorAction SilentlyContinue
     if (-not $StateFile) { Fail "state not found: $State" }

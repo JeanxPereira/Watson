@@ -9,7 +9,7 @@ export interface Host {
   terminate(pid: number): Promise<void>;
 }
 
-export interface LaunchOptions { bios?: string; elf?: string; state?: string; interpreter?: boolean; visible?: boolean; }
+export interface LaunchOptions { bios?: string; elf?: string; state?: string; interpreter?: boolean; visible?: boolean; gameArgs?: string; }
 
 const pidFile = (root: string) => path.join(root, 'Runtime', 'watson.pid');
 const emulatorPath = (root: string) => path.join(root, 'References', 'pcsx2', 'build', 'pcsx2-qt', 'Release', 'pcsx2-qt.exe');
@@ -22,6 +22,7 @@ export async function launch(host: Host, root: string, options: LaunchOptions): 
   if (options.state) args.push('-State', options.state);
   if (options.interpreter) args.push('-Interpreter');
   if (options.visible) args.push('-Visible');
+  if (options.gameArgs) args.push('-GameArgs', options.gameArgs);
 
   const { code, output } = await host.run('pwsh', args);
   const started = /pcsx2 pid (\d+)/.exec(output);

@@ -589,6 +589,7 @@ server.tool('watson_launch',
     elf: z.string().optional(),
     interpreter: z.boolean().default(false).describe('Run the EE and VU interpreters instead of the recompilers. Slow; needed by watson_gif_trace.'),
     visible: z.boolean().default(false).describe('Show the emulator window. By default it starts minimized.'),
+    args: z.string().optional().describe('Arguments handed to the program that boots, space separated, e.g. "BootClock"'),
   },
   async (request) => {
     try {
@@ -602,7 +603,7 @@ server.tool('watson_launch',
       debugServer = null;
       let started;
       try {
-        started = await launchAndWait(systemHost, WATSON_ROOT, { bios, elf, state, interpreter: request.interpreter, visible: request.visible }, probe,
+        started = await launchAndWait(systemHost, WATSON_ROOT, { bios, elf, state, interpreter: request.interpreter, visible: request.visible, gameArgs: request.args }, probe,
           { timeoutMs: 60000, intervalMs: 500, logTail: emulatorLogTail });
       } catch (error) {
         current()?.disconnect();

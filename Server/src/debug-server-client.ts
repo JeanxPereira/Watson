@@ -179,7 +179,7 @@ export class DebugServerClient {
         this.pendingReject = null;
         reject(new Error(`Command timeout: ${cmd.cmd}`));
         this.socket?.destroy();
-      }, cmd.cmd === 'frame_advance' ? 10000 + cmd.frames * 2000 : 10000);
+      }, cmd.cmd === 'frame_advance' ? 10000 + cmd.frames * 20000 : 10000);
       const settleResolve = (data: any) => { clearTimeout(timer); resolve(data); };
       const settleReject = (err: Error) => { clearTimeout(timer); reject(err); };
 

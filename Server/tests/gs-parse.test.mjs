@@ -216,7 +216,7 @@ test('the CLI parses a dump and exits 0', () => {
   assert.equal(fs.existsSync(out), true);
 });
 
-function traceFor(file, sources, { corrupt = false } = {}) {
+function traceFor(file, sources, { corrupt = false, pending = 0 } = {}) {
   const records = [{ type: 'header', version: 1, frame: 0 },
     { type: 'origin', id: 1, channel: 'vif1', frame: 0, chcr: '0x00000145', madr: '0x00300000', qwc: 0, tadr: '0x00300000', pc: '0x00220000', ra: '0x00221000', sp: '0x01ff0000', stack: [] },
     { type: 'vsync', frame: 0 }];
@@ -227,7 +227,7 @@ function traceFor(file, sources, { corrupt = false } = {}) {
     const data = Buffer.from(packet.data);
     if (corrupt) data[0] ^= 0xff;
     for (const source of sources(data.length)) records.push({ type: 'data', path: 1, ...source });
-    records.push({ type: 'packet', path: 1, size: data.length, pending: 0, hex: data.toString('hex') });
+    records.push({ type: 'packet', path: 1, size: data.length, pending, hex: data.toString('hex') });
     packets += 1;
   }
   records.push({ type: 'end', packets });
@@ -269,6 +269,27 @@ test('a trace that was never stopped is refused', () => {
   const trace = traceFor(file, (size) => [{ kind: 'dma', origin: 0, space: 'host', address: 0, size }]);
   fs.writeFileSync(trace, fs.readFileSync(trace, 'utf8').split('\n').slice(0, -2).join('\n') + '\n');
   assert.throws(() => parseGsDump(file, out, { trace }), /no end record/);
+});
+
+test('a trace whose byte queue lost step makes the answer PARTIAL and its draws originless', () => {
+  const { file, out } = write(dump(SCENE));
+  const trace = traceFor(file, (size) => [{ kind: 'dma', origin: 1, space: 'ee', address: 0x400000, size }], { pending: 16 });
+  const summary = parseGsDump(file, out, { trace });
+  assert.equal(summary.lostOrigins, 1);
+  assert.equal(lines(out).find((r) => r.type === 'draw').source.origin, 0);
+  assert.match(formatSummary(summary, file, out), /verdict: PARTIAL the origin of 1 packets was lost  coverage/);
+});
+
+test('the CLI answers a trace it cannot use with NOT VERIFIED and exit 2', () => {
+  const { file } = write(dump(SCENE));
+  const other = traceFor(file, (size) => [{ kind: 'dma', origin: 0, space: 'host', address: 0, size }], { corrupt: true });
+  const refused = spawnSync(process.execPath, ['dist/cli.js', 'parse', file, '--trace', other], { encoding: 'utf8' });
+  assert.equal(refused.status, 2, refused.stdout + refused.stderr);
+  assert.match(refused.stdout, /verdict: NOT VERIFIED .*is not a trace of this dump/);
+  fs.writeFileSync(other, fs.readFileSync(other, 'utf8').split('\n').slice(0, -2).join('\n') + '\n');
+  const unstopped = spawnSync(process.execPath, ['dist/cli.js', 'parse', file, '--trace', other], { encoding: 'utf8' });
+  assert.equal(unstopped.status, 2);
+  assert.match(unstopped.stdout, /verdict: NOT VERIFIED .*no end record/);
 });
 
 test('the CLI takes --trace and refuses it with no value', () => {

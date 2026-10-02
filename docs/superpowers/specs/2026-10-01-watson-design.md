@@ -216,6 +216,26 @@ build breakpoints and watchpoints never fire, so the server refuses to set them 
 `watson_gif_trace` always captures a GS dump and a PNG of the same frames and checks the trace
 against the dump before answering.
 
+What an origin is and is not. A `data` record names the last start of the channel that
+normally feeds its path. That is the code that sent the bytes when they are read straight from
+guest memory by that transfer, which the trace cannot prove by itself. Known cases where it is
+not:
+
+- Bytes that waited in the emulated GIF FIFO, or were written to the VIF1 FIFO by the EE,
+  arrive from an emulator buffer. These are recorded with origin 0 (unknown).
+- `XGKICK`: VU1 is usually started by a VIF1 `MSCAL`, but can be started by the EE through
+  `CTC2`, and a kick can finish while a later VIF1 transfer is running. The origin named is
+  then the wrong VIF1 start. `vuTpc` is the VU1 program counter when the bytes move, not the
+  address of the `XGKICK` instruction.
+- MFIFO: the origin is the start of the draining channel, not the code that filled the ring.
+
+A capture where each origin feeds exactly one packet, and every chunk lies inside its origin's
+`MADR` range, is free of the first and third; the clock capture is.
+
+Cost: with a trace running, every DMA start walks the EE stack, about 3 ms each. The OSDSYS
+clock starts 677 per frame, so a traced frame takes about 2 s. `frame_advance` allows 20 s per
+frame while a trace runs.
+
 ### 5.6 Symbols and identity
 
 - When the running build matches a `watson.json` entry with `symbols`, every address in an

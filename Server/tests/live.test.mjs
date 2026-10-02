@@ -329,3 +329,39 @@ test('live: under the interpreter, breakpoints, watchpoints and steps are refuse
     client.disconnect();
   }
 });
+
+test('live: a client that drops while tracing a running VM does not leave the trace open', async (t) => {
+  if (!(await listening())) return t.skip(`nothing listening on 127.0.0.1:${PORT}; start Emulator/Run.ps1`);
+  if (!EXPECT_VM) return t.skip('needs a running VM');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'watson-drop-'));
+  const first = new DebugServerClient('127.0.0.1', PORT);
+  await first.connect();
+  if (!(await first.getStatus()).interpreter) { first.disconnect(); return t.skip('the recompilers are on; launch with -Interpreter to trace'); }
+  await first.resume();
+  await first.gifTraceStart(path.join(dir, 'left.trace.jsonl'));
+  first.disconnect();
+
+  const second = new DebugServerClient('127.0.0.1', PORT);
+  let last = 'never tried';
+  try {
+    for (let attempt = 0; attempt < 60; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      try {
+        if (!second.isConnected()) await second.connect();
+        await second.gifTraceStart(path.join(dir, 'next.trace.jsonl'));
+        last = '';
+        break;
+      } catch (error) {
+        last = error.message;
+      }
+    }
+    assert.equal(last, '', `a new trace could not start within 15 s: ${last}`);
+    await second.gifTraceStop();
+    const size = fs.statSync(path.join(dir, 'left.trace.jsonl')).size;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    assert.equal(fs.statSync(path.join(dir, 'left.trace.jsonl')).size, size, 'the abandoned trace is still growing');
+  } finally {
+    if (second.isConnected()) await second.pause().catch(() => undefined);
+    second.disconnect();
+  }
+});

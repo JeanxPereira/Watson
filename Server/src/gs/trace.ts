@@ -92,7 +92,7 @@ export function readTrace(file: string): Trace {
       const bytes = Buffer.from(record.hex, 'hex');
       if (bytes.length !== record.size) return stop(`line ${line}: a packet of ${record.size} bytes carries ${bytes.length}`);
       const queue = queues[record.path];
-      const sources: Source[] = [];
+      let sources: Source[] = [];
       let left = bytes.length;
       while (left > 0 && queue.length > 0) {
         const head = queue[0];
@@ -101,13 +101,13 @@ export function readTrace(file: string): Trace {
         if (take === head.size) queue.shift(); else queue[0] = advance(head, take);
         left -= take;
       }
-      const short = left > 0;
-      if (short) sources.push(unknown(left));
       const held = queue.reduce((sum, source) => sum + source.size, 0);
       const target = started ? trace.packets : trace.preroll;
-      if (short || held !== record.pending) {
+      if (left > 0 || held !== record.pending) {
         trace.desyncs.push(started ? target.length : -1 - target.length);
-        // The emulator's count is the truth; what those bytes are is no longer known.
+        // The emulator's count is the truth. The queue was wrong before this packet took its
+        // bytes from it, so neither those bytes nor the ones left have a known source.
+        sources = [unknown(bytes.length)];
         queues[record.path] = record.pending > 0 ? [unknown(record.pending)] : [];
       }
       target.push({ path: record.path, bytes, sources });
@@ -202,16 +202,18 @@ export function formatTrace(trace: Trace, parity: Parity, files: { trace: string
   const hidden = rows.slice(SHOWN);
   const bytes = trace.packets.reduce((sum, packet) => sum + packet.bytes.length, 0);
 
-  let verdict = `FOUND ${trace.packets.length} packets`;
+  // Only packets the dump also holds were checked; the trace runs on until the dump is closed.
+  const unchecked = trace.packets.length - parity.matched;
+  let verdict = `FOUND ${parity.matched} packets`;
   if (parity.mismatch) verdict = `PARTIAL the trace and the dump differ: ${parity.mismatch}`;
   else if (trace.desyncs.length > 0) verdict = `PARTIAL the origin of ${trace.desyncs.length} packets was lost`;
-  else if (trace.packets.length === 0) verdict = 'EMPTY';
+  else if (parity.matched === 0) verdict = 'EMPTY';
 
   return [
     `trace: ${files.trace}`,
     `dump: ${files.dump}`,
     ...(files.png ? [`png: ${files.png}`] : []),
-    `frames: ${trace.vsyncAt.length}   packets: ${trace.packets.length}   bytes: ${bytes}   before the first vsync: ${trace.preroll.length} packets`,
+    `frames: ${trace.vsyncAt.length}   packets: ${trace.packets.length}${!parity.mismatch && unchecked > 0 ? ` (${unchecked} after the dump's last, not checked)` : ''}   bytes: ${bytes}   before the first vsync: ${trace.preroll.length} packets`,
     `origins recorded: ${trace.origins.size}`,
     'sources, by bytes (packets they begin, bytes, function entries of the stack):',
     ...shown.map(([key, group]) => `  ${String(group.packets).padStart(5)}  ${String(group.bytes).padStart(8)}  ${key}${group.stack ? `\n${' '.repeat(19)}stack ${group.stack}` : ''}`),

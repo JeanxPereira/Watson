@@ -31,6 +31,8 @@ export interface Summary {
   copies: Record<string, number>;
   /** With a trace: where the data of each draw's first primitive came from, by draw count. */
   sources: Record<string, number>;
+  /** With a trace: packets of this dump whose origin the trace lost. */
+  lostOrigins: number;
 }
 
 export interface ParseOptions {
@@ -39,6 +41,9 @@ export interface ParseOptions {
   /** A GIF trace of the same capture: every draw is tied to where its data came from. */
   trace?: string;
 }
+
+/** The trace given cannot be used: it is incomplete, or it is not a trace of this dump. */
+export class TraceRefused extends Error {}
 
 const hex = (value: number, digits: number) => `0x${value.toString(16).padStart(digits, '0')}`;
 const bump = (table: Record<string, number>, key: string) => { table[key] = (table[key] ?? 0) + 1; };
@@ -96,11 +101,13 @@ export function parseGsDump(file: string, out: string, options: ParseOptions = {
 function parseInto(file: string, sink: number, packets: number, options: ParseOptions): Summary {
   const data = fs.readFileSync(file);
   let trace: Trace | null = null;
+  let lostOrigins = 0;
   if (options.trace) {
     trace = readTrace(options.trace);
-    if (!trace.complete) throw new Error(`${options.trace}: ${trace.reason}`);
+    if (!trace.complete) throw new TraceRefused(`${options.trace}: ${trace.reason}`);
     const parity = compareTraceToDump(trace, data);
-    if (parity.mismatch) throw new Error(`${options.trace} is not a trace of this dump: ${parity.mismatch}`);
+    if (parity.mismatch) throw new TraceRefused(`${options.trace} is not a trace of this dump: ${parity.mismatch}`);
+    lostOrigins = trace.desyncs.filter((index) => index >= 0 && index < parity.transfers).length;
   }
   const headerSize = data.readUInt32LE(4);
   const header = {
@@ -122,7 +129,7 @@ function parseInto(file: string, sink: number, packets: number, options: ParseOp
   const summary: Summary = {
     packets, frames: 0, draws: 0, writes: 0, imageBytes: 0,
     unknownRegisters: {}, perFrame: [], byPrimitive: {}, alpha: {}, blendingOff: 0,
-    frameTargets: {}, textures: {}, untextured: 0, tests: {}, uploads: {}, copies: {}, sources: {},
+    frameTargets: {}, textures: {}, untextured: 0, tests: {}, uploads: {}, copies: {}, sources: {}, lostOrigins,
   };
 
   const emit = (record: unknown) => fs.writeSync(sink, `${JSON.stringify(record)}\n`);
@@ -241,7 +248,8 @@ function table(title: string, entries: Record<string, number>): string[] {
 }
 
 export function formatSummary(summary: Summary, file: string, out: string): string {
-  const verdict = summary.draws > 0 ? `FOUND ${summary.draws}` : 'EMPTY';
+  let verdict = summary.draws > 0 ? `FOUND ${summary.draws}` : 'EMPTY';
+  if (summary.lostOrigins > 0) verdict = `PARTIAL the origin of ${summary.lostOrigins} packets was lost`;
   return [
     `dump: ${file}`,
     `records: ${out}`,

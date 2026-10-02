@@ -90,7 +90,8 @@ namespace GifTrace
 		s_line += ']';
 	}
 
-	static void locate(const u8* mem, const char** space, u32* address)
+	// False when the bytes are not in guest memory: they sat in an emulator buffer first.
+	static bool locate(const u8* mem, const char** space, u32* address)
 	{
 		const uptr at = reinterpret_cast<uptr>(mem);
 		const uptr main = reinterpret_cast<uptr>(eeMem->Main);
@@ -115,7 +116,9 @@ namespace GifTrace
 		{
 			*space = "host";
 			*address = 0;
+			return false;
 		}
+		return true;
 	}
 
 	bool InterpretersActive()
@@ -222,7 +225,11 @@ namespace GifTrace
 		}
 		const char* space = "host";
 		u32 address = 0;
-		locate(mem, &space, &address);
+		// Bytes that waited in the GIF FIFO, or were written to the VIF1 FIFO, arrive from an
+		// emulator buffer; the channel may have been started again since, so the last start is
+		// not known to be theirs.
+		if (!locate(mem, &space, &address) && transferType != GIF_TRANS_FIFO)
+			origin = 0;
 		appendf("{\"type\":\"data\",\"path\":%u,\"kind\":\"%s\",\"origin\":%u,\"space\":\"%s\",\"address\":%u,\"size\":%u",
 			(transferType & 3) + 1, kind, origin, space, address, size);
 		if (transferType == GIF_TRANS_XGKICK)

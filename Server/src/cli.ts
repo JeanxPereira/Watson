@@ -6,7 +6,7 @@
  *
  * Exit codes: 0 FOUND or EMPTY, 2 NOT VERIFIED (the dump could not be read whole), 1 failed.
  */
-import { parseGsDump, formatSummary } from './gs/parse.js';
+import { parseGsDump, formatSummary, TraceRefused } from './gs/parse.js';
 import { walkGsDump } from './gsdump.js';
 
 const USAGE = 'usage: watson-gsdump parse <file.gs> [--out <file.jsonl>] [--trace <file.trace.jsonl>] [--writes]';
@@ -43,6 +43,10 @@ function main(argv: string[]): number {
     console.log(formatSummary(summary, file, out));
     return 0;
   } catch (error: any) {
+    if (error instanceof TraceRefused) {
+      console.log(`dump: ${file}\nbuild: unknown\nverdict: NOT VERIFIED ${error.message}  coverage 0/${walk.packets}`);
+      return 2;
+    }
     console.error(`failed: ${error.message}`);
     console.log(`dump: ${file}\nbuild: unknown\nverdict: PARTIAL ${error.message}  coverage ?/${walk.packets}`);
     return 1;

@@ -17,7 +17,7 @@ import { fileURLToPath } from 'node:url';
 import { pressPad, takeSnapshot, takeGsDump, takeGifTrace } from './navigation.js';
 import { readTrace, compareTraceToDump, formatTrace } from './gs/trace.js';
 import { launchAndWait, reusingProbe, kill, systemHost } from './lifecycle.js';
-import { parseGsDump, formatSummary } from './gs/parse.js';
+import { parseGsDump, formatSummary, TraceRefused } from './gs/parse.js';
 import { walkGsDump } from './gsdump.js';
 import { findConfig, loadCatalog, resolveLaunch, registerState, describeStates, Catalog } from './catalog.js';
 
@@ -754,6 +754,9 @@ server.tool('watson_gsdump_parse',
     try {
       return text(formatSummary(parseGsDump(file, target, { writes, trace }), file, target));
     } catch (e: any) {
+      if (e instanceof TraceRefused) {
+        return { content: [{ type: 'text' as const, text: `dump: ${file}\nbuild: unknown\nverdict: NOT VERIFIED ${e.message}  coverage 0/${walk.packets}` }], isError: true };
+      }
       return { content: [{ type: 'text' as const, text: `dump: ${file}\nbuild: unknown\nverdict: PARTIAL ${e.message}  coverage ?/${walk.packets}` }], isError: true };
     }
   }

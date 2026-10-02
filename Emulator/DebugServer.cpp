@@ -1073,8 +1073,10 @@ namespace DebugServer
 			return errorReply(cpuRunFailure(armed, "frame_advance"));
 
 		// FrameAdvance switched the VM to Running on the CPU thread; it pauses itself after the
-		// last frame. Allow real time for slow frames; interpreted ones are slower still.
-		const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000 + (int)count * (GifTrace::InterpretersActive() ? 2000 : 100));
+		// last frame. Allow real time for slow frames: interpreted ones are slower, and a traced
+		// frame walks the stack at every DMA start (about 2 s per frame on the OSDSYS clock).
+		const int perFrame = GifTrace::g_active ? 20000 : (GifTrace::InterpretersActive() ? 2000 : 100);
+		const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000 + (int)count * perFrame);
 		while (std::chrono::steady_clock::now() < deadline)
 		{
 			if (!s_running.load())
@@ -1191,10 +1193,15 @@ namespace DebugServer
 		// A client that dropped mid-press would leave its buttons held for whoever comes next.
 		if (s_running.load())
 		{
-			runOnCpuThread([]() {
-				// A trace the client left running would keep its file open and keep growing.
+			// A trace the client left running would keep its file open and keep growing. This is
+			// not sent through runOnCpuThread: that gives up after a bounded wait, and one traced
+			// frame can outlast it. Stop touches only the trace's own file, so it is safe whenever
+			// the CPU thread gets to it.
+			Host::RunOnCPUThread([]() {
 				u64 packets = 0;
 				GifTrace::Stop(&packets);
+			});
+			runOnCpuThread([]() {
 				if (!VMManager::HasValidVM())
 					return;
 				for (const PadButton& button : s_padButtons)

@@ -11,8 +11,10 @@ State: `rom-0230A-clock.p2s`. Captured 2026-10-02 with `watson_gif_trace`, 4 fra
 
 The trace was checked against the dump: all 5 416 transfer packets of the dump equal the
 trace's packets byte for byte, vsyncs in the same places, and the byte queue never lost step
-(0 of 6 093 packets). Parsed with `watson_gsdump_parse` and the trace: 1 432 draws in 8 frames,
-every one tied to a source.
+(0 of 6 093 packets). The trace holds 677 packets more than the dump, sent after the dump's
+last; those were not checked against anything. Parsed with `watson_gsdump_parse` and the
+trace: 1 432 draws in 8 frames, every one tied to a source. An independent review re-derived
+the numbers below from the files with its own script; four statements were corrected after it.
 
 Addresses here are of this build only. Nothing below says what a function *is*; names are not
 known for this build. Where a line says what a function is for, it is a reading.
@@ -26,11 +28,14 @@ known for this build. Where a line says what a function is for, it is a reading.
 | PATH3 (GIF DMA) | 3 258 packets, 364 896 bytes, every byte read from EE RAM |
 | Draws by path | 1 408 on PATH2, 24 on PATH3 |
 
-- **The clock does not use VU1 to send geometry.** Vertices arrive at the GS already
-  transformed; whatever transforms them runs on the EE side (EE core or VU0, not settled here).
-- **Every packet is its own DMA transfer.** 6 770 channel starts were recorded in 9 frames,
-  about 750 per frame, and each feeds one packet. There is no display list flushed once per
-  frame, so the EE call stack at the moment a transfer starts names the code that built it.
+- **The clock does not send geometry through VU1.** No packet took PATH1. *Reading: the
+  vertices are transformed on the EE side (EE core or VU0). The trace does not record what
+  else VIF1 was sent, so a VU1 program that computes without kicking is not ruled out by it.*
+- **Every packet is its own DMA transfer.** 6 770 channel starts were recorded, 677 in each of
+  the ten frame intervals the trace covers, and each feeds exactly one packet. There is no
+  display list flushed once per frame, so the EE call stack at the moment a transfer starts
+  names the code that *sent* it. *Reading: the same function built it; that holds if nothing
+  fills the buffer on another function's behalf, which is not checked here.*
 - Two functions start every transfer:
 
   | Function entry | Instruction that starts the channel | Channel | `CHCR` written |
@@ -39,14 +44,15 @@ known for this build. Where a line says what a function is for, it is a reading.
   | `0x0026edc0` | `0x0026ee98`: `sw a0,(v1)` | GIF (channel 2) | `0x00000101` |
 
   Both instructions were disassembled live and are the stores the trace names.
-- Geometry is built in the scratchpad, between `0x038` and `0x2248`, and sent from there. The
-  draws on PATH3 are the full-buffer untextured sprites, read from EE RAM at `0x001f0b30`,
+- PATH2 data is read from the scratchpad, between `0x0010` and `0x2560`; the first primitive
+  of a draw sits between `0x038` and `0x2248`. The draws on PATH3 are the full-buffer untextured sprites, read from EE RAM at `0x001f0b30`,
   `0x001f0c20` and `0x00297060`.
 
 ## Who sends what
 
-Every stack ends `… < 0x00221558 < 0x00221060 < 0x00221408 < 0x00158284`. `0x00221558` is on
-the stack of every draw of the screen. The table lists, for frame 1 of the dump (179 draws),
+The stack of every draw ends `… < 0x00221558 < 0x00221060 < 0x00221408 < 0x00158284`. Two
+PATH3 packets per frame that draw nothing are sent from elsewhere, through `0x00207558`. The
+table lists, for frame 1 of the dump (179 draws),
 the function entries between the sender and `0x00221558`, innermost first.
 
 | Call chain under `0x00221558` | Draws | Primitives | What they are, by the pipeline page |
@@ -56,7 +62,7 @@ the function entries between the sender and `0x00221558`, innermost first.
 | `0x0022fd00 < 0x002328d8 < 0x002216d8` | 10 | 10 | the five shrink-and-stretch round trips |
 | `0x0022fd00 < 0x002326a8 < 0x002216d8` | 2 | 2 | frame copied into `0x0d2` and `0x118` |
 | `0x0022fd00` | 4 | 4 | full-buffer sprites sent from `0x00221558` itself |
-| `0x00233f60 < 0x0022bcc8 < 0x0022beb8` | 64 | 1 020 | the twelve rods, five draws each |
+| `0x00233f60 < 0x0022bcc8 < 0x0022beb8` | 64 | 1 020 | the twelve rods: five sends each; in this frame two rods come out as seven draws, their fourth and fifth each split in two |
 | `0x00235630 < 0x0022b928 < 0x0022bcc8 < 0x0022beb8` | 14 | 672 | orb line strips, 48 segments each |
 | `0x0022fd00 < 0x00235630 < 0x0022b928 < 0x0022bcc8 < 0x0022beb8` | 28 | 28 | orb sprites, textures `0x2e40` and `0x2e00` |
 | `0x0022bdb0` | 2 | 2 | untextured sprite that starts each extra pass |

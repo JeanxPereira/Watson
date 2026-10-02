@@ -90,12 +90,14 @@ test('a queue that disagrees with the emulator is counted and restarted from its
   const trace = readTrace(traceFile([header, gif, vsync, data(3, 'dma', 1, 'ee', 0x400000, 32), packet(3, A, 16),
     data(3, 'dma', 1, 'ee', 0x400100, 16), packet(3, C, 16)]));
   assert.deepEqual(trace.desyncs, [0]);
+  // The queue was already wrong when this packet took its bytes from it.
+  assert.deepEqual(trace.packets[0].sources.map((s) => [s.kind, s.origin, s.size]), [['unknown', 0, 32]]);
   assert.deepEqual(trace.packets[1].sources.map((s) => [s.kind, s.size]), [['unknown', 16]]);
 });
 
-test('a packet with more bytes than the queue holds gets an unknown remainder', () => {
+test('a packet with more bytes than the queue holds has no known source at all', () => {
   const trace = readTrace(traceFile([header, gif, vsync, data(3, 'dma', 1, 'ee', 0x400000, 16), packet(3, A, 0)]));
-  assert.deepEqual(trace.packets[0].sources.map((s) => [s.kind, s.size]), [['dma', 16], ['unknown', 16]]);
+  assert.deepEqual(trace.packets[0].sources.map((s) => [s.kind, s.size]), [['unknown', 32]]);
   assert.deepEqual(trace.desyncs, [0]);
 });
 
@@ -169,4 +171,12 @@ test('the summary lists the twelve largest sources and says how many it left out
   assert.match(text, /ra 0x0020200f/);
   assert.doesNotMatch(text, /ra 0x00202001\b/);
   assert.match(text, /and 3 more sources, 96 bytes; every one is in the trace file/);
+});
+
+test('the verdict counts only packets checked against the dump and says how many were not', () => {
+  const trace = readTrace(traceFile([header, vsync, data(3, 'dma', 0, 'host', 0, 32), packet(3, A), vsync,
+    data(3, 'dma', 0, 'host', 0, 48), packet(3, B)]));
+  const text = formatTrace(trace, compareTraceToDump(trace, dumpOf([A, 'vsync'])), { trace: 't', dump: 'd' });
+  assert.match(text, /packets: 2 \(1 after the dump's last, not checked\)/);
+  assert.match(text, /verdict: FOUND 1 packets  coverage 1\/1$/);
 });

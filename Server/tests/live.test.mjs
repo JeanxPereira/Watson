@@ -11,7 +11,7 @@ import path from 'node:path';
 import { takeGifTrace } from '../dist/navigation.js';
 import { readTrace, compareTraceToDump } from '../dist/gs/trace.js';
 
-const PORT = 21512;
+const PORT = Number(process.env.WATSON_PORT) || 21512;
 const EXPECT_VM = process.env.WATSON_EXPECT_VM === '1';
 
 function listening() {
@@ -410,13 +410,33 @@ test('live: a malformed probe is refused whole and leaves no trace running', asy
     await client.pause();
     const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'watson-probe-')), 'bad.trace.jsonl');
     await assert.rejects(client.gifTraceStart(file, [{ pc: '0x232da0', ranges: ['q9:0x10'] }]), /bad probe "0x232da0=q9:0x10".*register/);
-    await assert.rejects(client.gifTraceStart(file, [{ pc: '0x232da0', ranges: ['a0:0x8000'] }]), /bad probe.*length/);
+    await assert.rejects(client.gifTraceStart(file, [{ pc: '0x232da0', ranges: ['a0:0x10001'] }]), /bad probe.*length/);
     // A register name in the wrong case, or an address without 0x, must not be taken for something else.
     await assert.rejects(client.gifTraceStart(file, [{ pc: '0x232da0', ranges: ['A0:0x10'] }]), /bad probe.*register name nor a 0x address/);
     await assert.rejects(client.gifTraceStart(file, [{ pc: '0x232da0', ranges: ['28a348:0x4'] }]), /bad probe.*register name nor a 0x address/);
     assert.equal(fs.existsSync(file), false);
     await client.gifTraceStart(file);
     await client.gifTraceStop();
+  } finally {
+    client.disconnect();
+  }
+});
+
+test('live: a capture applies its pad schedule and memory writes on the frames asked for, and records them', async (t) => {
+  if (!(await listening())) return t.skip(`nothing listening on 127.0.0.1:${PORT}; start Emulator/Run.ps1`);
+  if (!EXPECT_VM) return t.skip('needs a running VM');
+  const client = new DebugServerClient('127.0.0.1', PORT);
+  await client.connect();
+  try {
+    const mode = (await client.getStatus()).interpreter ? 'plain' : 'recompiler';
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'watson-control-'));
+    const schedule = { pad: [{ frame: 1, press: ['down'], frames: 2 }], writes: [{ frame: 2, address: '0x01e00000', hex: 'deadbeef' }] };
+    const trace = readTrace((await takeGifTrace(client, path.join(dir, 'control.png'), 4, [], [], mode, schedule)).trace);
+    assert.equal(trace.complete, true, trace.reason);
+    assert.deepEqual(trace.inputs.map((input) => [input.type, input.captureFrame]), [['pad', 1], ['write', 2], ['pad', 3]]);
+    assert.deepEqual(trace.inputs[0].press, ['down']);
+    assert.deepEqual(trace.inputs[2].release, ['down']);
+    assert.equal((await client.readMemory('0x01e00000', 4)).replace(/\s/g, '').toLowerCase().includes('deadbeef'), true);
   } finally {
     client.disconnect();
   }

@@ -1,6 +1,6 @@
 import * as fs from 'node:fs';
 import { walkGsDump } from './gsdump.js';
-import type { ProbeSpec, TraceMode } from './debug-server-client.js';
+import type { CaptureSchedule, ProbeSpec, TraceMode } from './debug-server-client.js';
 
 export interface Emulator {
   frameAdvance(frames: number): Promise<number>;
@@ -96,9 +96,29 @@ export async function takeGsDump(emulator: Emulator, path: string, frames: numbe
 }
 
 export interface Tracer extends Emulator {
-  gifTraceStart(path: string, probes?: ProbeSpec[], mode?: TraceMode): Promise<void>;
+  gifTraceStart(path: string, probes?: ProbeSpec[], mode?: TraceMode, schedule?: CaptureSchedule): Promise<void>;
   gifTraceStop(): Promise<number>;
   pause(): Promise<unknown>;
+}
+
+/**
+ * Refuse a schedule that would act outside the captured frames, or fight the buttons held for
+ * the whole capture: the emulator would apply it in the frames run to close the dump, or not at all.
+ */
+function checkSchedule(frames: number, probes: ProbeSpec[], hold: string[], schedule: CaptureSchedule): void {
+  const after = `the capture holds ${frames} frames (0 to ${frames - 1})`;
+  for (const step of schedule.pad ?? []) {
+    if (step.frame >= frames) throw new Error(`pad entry at frame ${step.frame} falls outside it: ${after}`);
+    for (const button of step.press) {
+      if (hold.includes(button)) throw new Error(`${button} is both held and scheduled; leave it out of one`);
+    }
+  }
+  for (const write of schedule.writes ?? []) {
+    if (write.frame >= frames) throw new Error(`write at frame ${write.frame} falls outside it: ${after}`);
+  }
+  for (const probe of probes) {
+    if (probe.fromFrame !== undefined && probe.fromFrame >= frames) throw new Error(`probe ${probe.pc} opens at frame ${probe.fromFrame}, outside it: ${after}`);
+  }
 }
 
 /**
@@ -107,11 +127,14 @@ export interface Tracer extends Emulator {
  * between the two requests and the dump would begin one vsync late. The trace is stopped only
  * after the dump is closed, so it covers every packet the dump holds.
  */
-export async function takeGifTrace(emulator: Tracer, path: string, frames: number, probes: ProbeSpec[] = [], hold: string[] = [], mode: TraceMode = 'interpreter'): Promise<{ png: string; dump: string; trace: string }> {
+export async function takeGifTrace(emulator: Tracer, path: string, frames: number, probes: ProbeSpec[] = [], hold: string[] = [], mode: TraceMode = 'interpreter', schedule: CaptureSchedule = {}): Promise<{ png: string; dump: string; trace: string }> {
+  checkSchedule(frames, probes, hold, schedule);
   const trace = path.replace(/\.png$/i, '.trace.jsonl');
   fs.rmSync(trace, { force: true });
   await emulator.pause();
-  await emulator.gifTraceStart(trace, probes, mode);
+  // The emulator applies the schedule itself, at each vsync on the CPU thread: capture frame 0 is
+  // the one that starts at the first vsync after the trace is armed, the first the dump holds.
+  await emulator.gifTraceStart(trace, probes, mode, schedule);
   let files: { png: string; dump: string };
   try {
     // Held from the first traced frame, so what the press sets off is recorded from its start.

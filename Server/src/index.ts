@@ -710,6 +710,25 @@ server.tool('watson_gs_dump', 'Capture N frames to an uncompressed GS dump (.gs)
   }
 );
 
+// Capture frame 0 is the frame that starts at the first vsync after the capture is armed: the
+// first frame the dump holds. Everything below is applied by the emulator on the CPU thread at
+// that frame boundary, and recorded in the trace.
+const FRAME_NOTE = 'Frames count from 0, the first frame the dump holds (it starts at the first vsync after the capture is armed); each must be below `frames`.';
+const padSchedule = z.array(z.object({
+  frame: z.number().int().min(0).describe('Capture frame the buttons go down at, before the EE runs it'),
+  press: z.array(z.string()).min(1).describe('Buttons: up, right, down, left, triangle, circle, cross, square, select, start, l1, l2, r1, r2, l3, r3'),
+  frames: z.number().int().min(1).describe('Frames they stay down; they come up at the start of frame + frames (or when the capture stops)'),
+})).default([]).describe(`Pad buttons on port 1, pressed and let go on exact frame boundaries inside the capture; each change is recorded in the trace as a "pad" record. ${FRAME_NOTE} A button may not also be in hold.`);
+const memoryWrites = z.array(z.object({
+  frame: z.number().int().min(0).describe('Capture frame whose start the write lands at, before the EE runs that frame'),
+  address: z.string().describe('EE address, hex: main RAM (any segment) or the scratchpad (0x70000000)'),
+  hex: z.string().describe('Bytes to write, in memory order, e.g. "74000000" for the word 0x00000074. Up to 0x10000 bytes.'),
+})).default([]).describe(`Writes to EE memory at the start of a capture frame, in the order given, each recorded in the trace as a "write" record. ${FRAME_NOTE} A write to code is a patch: compiled blocks there are thrown away, under either CPU mode. A patch written before the program's code is loaded is overwritten by the load, as is any write the program itself later overwrites.`);
+const probeWindow = {
+  fromFrame: z.number().int().min(0).optional().describe('First capture frame the probe records in; without it, it records from the moment the capture is armed'),
+  untilFrame: z.number().int().min(1).optional().describe('First capture frame the probe no longer records in; without it, until the capture stops'),
+};
+
 server.tool('watson_gif_trace',
   'Record, for N frames, every packet the EE side sends to the GS with where it came from: GIF path, source address, the EE instruction and call stack that started the DMA, the VU1 program counter. Captures a GS dump and a PNG of the same frames and checks the trace against the dump byte for byte. Needs watson_launch with interpreter: true. Leaves the VM paused. Feed the trace to watson_gsdump_parse to tie each draw to its origin.',
   {
@@ -718,14 +737,17 @@ server.tool('watson_gif_trace',
     probes: z.array(z.object({
       pc: z.string().describe('Program counter, hex. The probe fires before the instruction there executes.'),
       ranges: z.array(z.string()).default([]).describe('Memory to record, each `[*]base[+hex]:hexlength`: base is a register name (a0, sp, ...) or a hex address; `*` follows the 32-bit pointer found there. Example: "a0:0x160", "*a1+0x60:0x40". Up to 64, 0x10000 bytes each.'),
+      ...probeWindow,
     })).max(1024).default([]).describe('Record the EE registers and these memory ranges into the trace every time execution reaches a program counter: the real inputs of a function, in order with the packets it sends'),
     hold: z.array(z.string()).default([]).describe('Pad buttons held on port 1 through the traced frames, pressed after the trace is armed and released before it stops: records what a press sets off from its first frame'),
+    pad: padSchedule,
+    writes: memoryWrites,
   },
-  async ({ frames, path: given, probes, hold }) => {
+  async ({ frames, path: given, probes, hold, pad, writes }) => {
     try {
       const client = requireDebug();
       const frame = (await client.getStatus()).frame;
-      const files = await takeGifTrace(client, capturePath(given, `trace-${frame}`), frames, probes, hold);
+      const files = await takeGifTrace(client, capturePath(given, `trace-${frame}`), frames, probes, hold, 'interpreter', { pad, writes });
       const trace = readTrace(files.trace);
       if (!trace.complete) {
         return { content: [{ type: 'text' as const, text: `trace: ${files.trace}\nbuild: unknown\nverdict: NOT VERIFIED ${trace.reason}  coverage 0/?` }], isError: true };
@@ -746,15 +768,18 @@ server.tool('watson_frame_capture',
     probes: z.array(z.object({
       pc: z.string().describe('Program counter, hex. The probe fires before the instruction there executes.'),
       ranges: z.array(z.string()).default([]).describe('Memory to record, as for watson_gif_trace. Up to 64, 0x10000 bytes each.'),
+      ...probeWindow,
     })).max(1024).default([]),
     hold: z.array(z.string()).default([]).describe('Pad buttons held on port 1 through the captured frames'),
+    pad: padSchedule,
+    writes: memoryWrites,
   },
-  async ({ frames, path: given, cpu, probes, hold }) => {
+  async ({ frames, path: given, cpu, probes, hold, pad, writes }) => {
     try {
       const client = requireDebug();
       const frame = (await client.getStatus()).frame;
       const started = Date.now();
-      const files = await takeGifTrace(client, capturePath(given, `capture-${frame}`), frames, probes, hold, cpu === 'recompiler' ? 'recompiler' : 'plain');
+      const files = await takeGifTrace(client, capturePath(given, `capture-${frame}`), frames, probes, hold, cpu === 'recompiler' ? 'recompiler' : 'plain', { pad, writes });
       const seconds = (Date.now() - started) / 1000;
       const trace = readTrace(files.trace);
       if (!trace.complete) {

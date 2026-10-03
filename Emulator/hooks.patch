@@ -49,6 +49,27 @@ index 4c8ce81..f9d80bc 100644
  	DebugTools/BiosDebugData.h)
  
  set(pcsx2HostSources
+diff --git a/pcsx2/Counters.cpp b/pcsx2/Counters.cpp
+index 6b66726..de12054 100644
+--- a/pcsx2/Counters.cpp
++++ b/pcsx2/Counters.cpp
+@@ -7,6 +7,7 @@
+ #include "Common.h"
+ #include "R3000A.h"
+ #include "Counters.h"
++#include "DebugTools/GifTrace.h"
+ #include "IopCounters.h"
+ 
+ #include "GS.h"
+@@ -501,6 +502,8 @@ static __fi void VSyncStart(u64 sCycle)
+ 		gsPostVsyncStart(); // MUST be after framelimit; doing so before causes funk with frame times!
+ 	}
+ 
++	GifTrace::OnFrameStart();
++
+ 	// Poll input after MTGS frame push, just in case it has to stall to catch up.
+ 	VMManager::Internal::PollInputOnCPUThread();
+ 
 diff --git a/pcsx2/GS.cpp b/pcsx2/GS.cpp
 index a16d1b9..9a72202 100644
 --- a/pcsx2/GS.cpp

@@ -69,8 +69,27 @@ export interface ThreadInfo {
  * GIF trace. A range is `[*]base[+hex]:hexlength`: base is a register name (a0, sp, ...) or a
  * hex address; `*` reads the 32-bit pointer found there and records what it points to.
  */
-export interface ProbeSpec { pc: string; ranges?: string[] }
+export interface ProbeSpec {
+  pc: string;
+  ranges?: string[];
+  /** First capture frame the probe records in (frame 0 is the first frame after the first vsync). */
+  fromFrame?: number;
+  /** First capture frame the probe no longer records in. */
+  untilFrame?: number;
+}
 export type TraceMode = 'interpreter' | 'plain' | 'recompiler';
+
+/** Buttons held on port 1 from capture frame `frame` for `frames` frames. */
+export interface PadStep { frame: number; press: string[]; frames: number }
+/** Bytes written to EE memory at the start of capture frame `frame`, before the EE runs it. */
+export interface MemoryWrite { frame: number; address: string; hex: string }
+/** What a capture applies on its own frame boundaries, on the CPU thread. */
+export interface CaptureSchedule { pad?: PadStep[]; writes?: MemoryWrite[] }
+
+export const PAD_BUTTONS = ['up', 'right', 'down', 'left', 'triangle', 'circle', 'cross', 'square',
+  'select', 'start', 'l1', 'l2', 'r1', 'r2', 'l3', 'r3'];
+
+const isFrame = (value: unknown): value is number => Number.isInteger(value) && (value as number) >= 0;
 
 /** Probes in the form the DebugServer takes: `pc=range,range;pc`. */
 export function probeString(probes: ProbeSpec[]): string {
@@ -80,7 +99,42 @@ export function probeString(probes: ProbeSpec[]): string {
     for (const range of ranges) {
       if (/[;,=\s]/.test(range) || range.length === 0) throw new Error(`range "${range}" of probe ${probe.pc} holds a character the grammar reserves`);
     }
-    return ranges.length > 0 ? `${probe.pc}=${ranges.join(',')}` : probe.pc;
+    const { fromFrame: from, untilFrame: until } = probe;
+    let head = probe.pc;
+    if (from !== undefined || until !== undefined) {
+      if ((from !== undefined && !isFrame(from)) || (until !== undefined && !isFrame(until)) ||
+        (from !== undefined && until !== undefined && until <= from)) {
+        throw new Error(`the window of probe ${probe.pc} must be whole frames from 0, ending after it opens`);
+      }
+      head += `@${from ?? ''}-${until ?? ''}`;
+    }
+    return ranges.length > 0 ? `${head}=${ranges.join(',')}` : head;
+  }).join(';');
+}
+
+/** A pad schedule in the form the DebugServer takes: `frame:frames:button+button;...`. */
+export function padString(steps: PadStep[]): string {
+  return steps.map((step) => {
+    if (!isFrame(step.frame)) throw new Error(`pad entry frame ${step.frame} is not a whole frame from 0`);
+    if (!Number.isInteger(step.frames) || step.frames < 1) throw new Error(`pad entry at frame ${step.frame}: frames must be at least 1`);
+    if (!step.press || step.press.length === 0) throw new Error(`pad entry at frame ${step.frame} has no buttons`);
+    for (const button of step.press) {
+      if (!PAD_BUTTONS.includes(button)) throw new Error(`pad entry at frame ${step.frame}: unknown button ${button}; valid: ${PAD_BUTTONS.join(', ')}`);
+    }
+    return `${step.frame}:${step.frames}:${step.press.join('+')}`;
+  }).join(';');
+}
+
+/** Memory writes in the form the DebugServer takes: `frame:0xaddress:hex;...`. */
+export function writeString(writes: MemoryWrite[]): string {
+  return writes.map((write) => {
+    if (!isFrame(write.frame)) throw new Error(`write frame ${write.frame} is not a whole frame from 0`);
+    if (!/^(0x)?[0-9a-fA-F]{1,8}$/.test(write.address)) throw new Error(`write address "${write.address}" is not a hex number`);
+    if (!/^([0-9a-fA-F]{2})+$/.test(write.hex) || write.hex.length > 0x20000) {
+      throw new Error(`write at ${write.address}: hex must be whole bytes, 1 to 0x10000 of them`);
+    }
+    const address = parseInt(write.address, 16).toString(16);
+    return `${write.frame}:0x${address}:${write.hex.toLowerCase()}`;
   }).join(';');
 }
 
@@ -256,9 +310,14 @@ export class DebugServerClient {
    * most of a traced frame's cost; 'recompiler' (recompilers) records packets and probes at full
    * speed, with arithmetic that is not the interpreters' to the last bit.
    */
-  async gifTraceStart(path: string, probes: ProbeSpec[] = [], mode: TraceMode = 'interpreter'): Promise<void> {
+  async gifTraceStart(path: string, probes: ProbeSpec[] = [], mode: TraceMode = 'interpreter', schedule: CaptureSchedule = {}): Promise<void> {
     const wire = probeString(probes);
-    const resp = await this.send({ cmd: 'gif_trace_start', path: DebugServerClient.wirePath(path), ...(wire ? { probes: wire } : {}), ...(mode !== 'interpreter' ? { mode } : {}) });
+    const pad = padString(schedule.pad ?? []);
+    const writes = writeString(schedule.writes ?? []);
+    const resp = await this.send({
+      cmd: 'gif_trace_start', path: DebugServerClient.wirePath(path), ...(wire ? { probes: wire } : {}), ...(mode !== 'interpreter' ? { mode } : {}),
+      ...(pad ? { pad } : {}), ...(writes ? { writes } : {}),
+    });
     if (!resp.ok) throw new Error(resp.error);
   }
 

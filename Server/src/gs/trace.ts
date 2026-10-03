@@ -29,7 +29,14 @@ export interface Probe {
   at: number;
   /** Position of the probe in the list asked for: several probes may share a program counter. */
   index?: number;
+  /** Capture frame it fired in: 0 is the frame after the first vsync, -1 the part before it. */
+  captureFrame?: number;
 }
+/** Pad buttons pressed or let go at the start of a capture frame, and the ones held after. */
+export interface PadInput { type: 'pad'; captureFrame: number; frame: number; press: string[]; release: string[]; held: string[] }
+/** Bytes written to EE memory at the start of a capture frame, before the EE ran it. */
+export interface WriteInput { type: 'write'; captureFrame: number; frame: number; address: number; bytes: Buffer }
+export type Input = PadInput | WriteInput;
 export interface Trace {
   complete: boolean;
   reason?: string;
@@ -47,6 +54,11 @@ export interface Trace {
   recompiler: boolean;
   /** The probes as asked for, in the wire grammar; index i is the probe whose records carry index i. */
   probeSpec: string;
+  /** The pad schedule and the memory writes as asked for, in the wire grammar. */
+  padSpec: string;
+  writeSpec: string;
+  /** What the capture applied, in the order it applied it. */
+  inputs: Input[];
 }
 export interface Parity { transfers: number; matched: number; vsyncs: number; mismatch?: string }
 
@@ -60,7 +72,7 @@ function advance(source: Source, by: number): Source {
 }
 
 export function readTrace(file: string): Trace {
-  const trace: Trace = { complete: false, frame: 0, origins: new Map(), preroll: [], packets: [], vsyncAt: [], desyncs: [], probes: [], recompiler: false, probeSpec: '' };
+  const trace: Trace = { complete: false, frame: 0, origins: new Map(), preroll: [], packets: [], vsyncAt: [], desyncs: [], probes: [], recompiler: false, probeSpec: '', padSpec: '', writeSpec: '', inputs: [] };
   const stop = (reason: string): Trace => ({ ...trace, complete: false, reason });
 
   let data: Buffer;
@@ -96,6 +108,8 @@ export function readTrace(file: string): Trace {
       trace.frame = record.frame;
       trace.recompiler = record.recompiler === true;
       trace.probeSpec = typeof record.probes === 'string' ? record.probes : '';
+      trace.padSpec = typeof record.pad === 'string' ? record.pad : '';
+      trace.writeSpec = typeof record.writes === 'string' ? record.writes : '';
     } else if (record.type === 'origin') {
       const { type, ...origin } = record;
       trace.origins.set(origin.id, origin as Origin);
@@ -151,7 +165,16 @@ export function readTrace(file: string): Trace {
         mem: (record.mem ?? []).map((range: any) => ({ address: range.address, bytes: typeof range.hex === 'string' ? Buffer.from(range.hex, 'hex') : null })),
         preroll: !started, at: (started ? trace.packets : trace.preroll).length,
         ...(typeof record.probe === 'number' ? { index: record.probe } : {}),
+        ...(typeof record.captureFrame === 'number' ? { captureFrame: record.captureFrame } : {}),
       });
+    } else if (record.type === 'pad') {
+      const names = (list: unknown): string[] | null => (Array.isArray(list) && list.every((name) => typeof name === 'string') ? list : null);
+      const press = names(record.press), release = names(record.release), held = names(record.held);
+      if (!press || !release || !held || typeof record.captureFrame !== 'number') return stop(`line ${line}: a pad record needs captureFrame, press, release and held`);
+      trace.inputs.push({ type: 'pad', captureFrame: record.captureFrame, frame: record.frame, press, release, held });
+    } else if (record.type === 'write') {
+      if (typeof record.hex !== 'string' || typeof record.captureFrame !== 'number') return stop(`line ${line}: a write record needs captureFrame and hex`);
+      trace.inputs.push({ type: 'write', captureFrame: record.captureFrame, frame: record.frame, address: parseInt(record.address, 16), bytes: Buffer.from(record.hex, 'hex') });
     } else if (record.type === 'vsync') {
       if (started) trace.vsyncAt.push(trace.packets.length);
       started = true;
@@ -244,6 +267,13 @@ export function formatTrace(trace: Trace, parity: Parity, files: { trace: string
     `probes: ${trace.probes.length} records`,
     ...[...hits.entries()].sort((a, b) => b[1] - a[1]).map(([pc, count]) => `  ${String(count).padStart(5)}  0x${pc.toString(16).padStart(8, '0')}`),
   ];
+  const inputLines = trace.inputs.length === 0 ? [] : [
+    `inputs: ${trace.inputs.length}`,
+    ...trace.inputs.slice(0, SHOWN).map((input) => `  frame ${input.captureFrame}: ${input.type === 'write'
+      ? `write ${input.bytes.length} bytes at 0x${input.address.toString(16).padStart(8, '0')}`
+      : [input.press.length ? `press ${input.press.join('+')}` : '', input.release.length ? `release ${input.release.join('+')}` : ''].filter(Boolean).join(', ')}`),
+    ...(trace.inputs.length > SHOWN ? [`  and ${trace.inputs.length - SHOWN} more; every one is in the trace file`] : []),
+  ];
   const rows = [...groups.entries()].sort((a, b) => b[1].bytes - a[1].bytes);
   const shown = rows.slice(0, SHOWN);
   const hidden = rows.slice(SHOWN);
@@ -263,6 +293,7 @@ export function formatTrace(trace: Trace, parity: Parity, files: { trace: string
     `frames: ${trace.vsyncAt.length}   packets: ${trace.packets.length}${!parity.mismatch && unchecked > 0 ? ` (${unchecked} after the dump's last, not checked)` : ''}   bytes: ${bytes}   before the first vsync: ${trace.preroll.length} packets`,
     `origins recorded: ${trace.origins.size}`,
     ...probeLines,
+    ...inputLines,
     'sources, by bytes (packets they begin, bytes, function entries of the stack):',
     ...shown.map(([key, group]) => `  ${String(group.packets).padStart(5)}  ${String(group.bytes).padStart(8)}  ${key}${group.stack ? `\n${' '.repeat(19)}stack ${group.stack}` : ''}`),
     ...(hidden.length > 0 ? [`  and ${hidden.length} more sources, ${hidden.reduce((sum, [, group]) => sum + group.bytes, 0)} bytes; every one is in the trace file`] : []),

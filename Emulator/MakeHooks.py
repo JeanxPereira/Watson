@@ -80,6 +80,15 @@ EDITS = {
          '\t\tif (!CBreakPoints::IsAddressBreakPoint(BREAKPOINT_EE, pc) && !CBreakPoints::IsAddressBreakPoint(BREAKPOINT_EE, pc + 4))\n'
          '\t\t\treturn;\n\t}\n'),
     ],
+    # The capture schedule: pad changes, memory writes and probe windows take effect at the start
+    # of a frame, after the vsync is recorded and before the EE runs the frame.
+    "pcsx2/Counters.cpp": [
+        ('#include "Counters.h"\n',
+         '#include "Counters.h"\n#include "DebugTools/GifTrace.h"\n'),
+        ('\t// Poll input after MTGS frame push, just in case it has to stall to catch up.\n',
+         '\tGifTrace::OnFrameStart();\n\n'
+         '\t// Poll input after MTGS frame push, just in case it has to stall to catch up.\n'),
+    ],
     "pcsx2/Gif.cpp": [
         ('void dmaGIF()\n{\n', 'void dmaGIF()\n{\n\tGifTrace::OnOrigin(2);\n'),
     ],

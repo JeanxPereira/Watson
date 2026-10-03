@@ -397,17 +397,8 @@ namespace DebugServer
 		return path;
 	}
 
-	struct PadButton { const char* name; u32 bind; };
-	static const PadButton s_padButtons[] = {
-		{"up", PadDualshock2::Inputs::PAD_UP}, {"right", PadDualshock2::Inputs::PAD_RIGHT},
-		{"down", PadDualshock2::Inputs::PAD_DOWN}, {"left", PadDualshock2::Inputs::PAD_LEFT},
-		{"triangle", PadDualshock2::Inputs::PAD_TRIANGLE}, {"circle", PadDualshock2::Inputs::PAD_CIRCLE},
-		{"cross", PadDualshock2::Inputs::PAD_CROSS}, {"square", PadDualshock2::Inputs::PAD_SQUARE},
-		{"select", PadDualshock2::Inputs::PAD_SELECT}, {"start", PadDualshock2::Inputs::PAD_START},
-		{"l1", PadDualshock2::Inputs::PAD_L1}, {"l2", PadDualshock2::Inputs::PAD_L2},
-		{"r1", PadDualshock2::Inputs::PAD_R1}, {"r2", PadDualshock2::Inputs::PAD_R2},
-		{"l3", PadDualshock2::Inputs::PAD_L3}, {"r3", PadDualshock2::Inputs::PAD_R3},
-	};
+	using GifTrace::PadButton;
+	static const auto& s_padButtons = GifTrace::g_padButtons;
 
 	static std::string handleOnCpuThread(const std::string& jsonLine)
 	{
@@ -1016,7 +1007,8 @@ namespace DebugServer
 			const std::string path = wirePath(params, "path");
 			if (path.empty())
 				return errorReply("path is required");
-			const std::string refused = GifTrace::Start(path, getStr(params, "probes", ""), getStr(params, "mode", "") == "recompiler", getStr(params, "mode", "") == "");
+			const std::string refused = GifTrace::Start(path, getStr(params, "probes", ""), getStr(params, "mode", "") == "recompiler", getStr(params, "mode", "") == "",
+				getStr(params, "pad", ""), getStr(params, "writes", ""));
 			if (!refused.empty())
 				return errorReply(refused);
 			j.startObject();

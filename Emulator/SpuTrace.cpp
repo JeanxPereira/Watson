@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "SpuTrace.h"
+#include "Breakpoints.h"
 #include "GifTrace.h"
 
 #include "Common.h"
@@ -351,6 +352,19 @@ namespace SpuTrace
 		IopExec(pc);
 		if (find(pc + 4) && (R5900::GetInstruction(iopMemRead32(pc)).flags & IS_BRANCH))
 			IopExec(pc + 4);
+	}
+
+	int IopRecProbeFlags(u32 addr, bool branch)
+	{
+		return (IsIopRecProbe(addr) ? 1 : 0) | (branch && IsIopRecProbe(addr + 4) ? 2 : 0);
+	}
+
+	bool IopRecProbeOnly(u32 pc)
+	{
+		if (!g_iopRecProbing)
+			return false;
+		IopRecCheck(pc);
+		return !CBreakPoints::IsAddressBreakPoint(BREAKPOINT_IOP, pc) && !CBreakPoints::IsAddressBreakPoint(BREAKPOINT_IOP, pc + 4);
 	}
 
 	static void writeWavHeader(std::FILE* file, u32 dataBytes)

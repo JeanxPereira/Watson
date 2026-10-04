@@ -1,5 +1,5 @@
 diff --git a/pcsx2-qt/QtHost.cpp b/pcsx2-qt/QtHost.cpp
-index a177f39..8758bf9 100644
+index a177f3980f0dc1297b1d560dc73dd6baaf8b0463..8758bf9a1d9f25b9ccded4a40a72ca7e44d510f7 100644
 --- a/pcsx2-qt/QtHost.cpp
 +++ b/pcsx2-qt/QtHost.cpp
 @@ -18,6 +18,7 @@
@@ -28,7 +28,7 @@ index a177f39..8758bf9 100644
  
  	// Move back to the UI thread, since we're no longer running.
 diff --git a/pcsx2/CMakeLists.txt b/pcsx2/CMakeLists.txt
-index 4c8ce81..e796102 100644
+index 4c8ce815df523455c39237dec6b650dd57f6e6c9..e796102c6c3ef8fbfd526c04c837de8df6ffa2a7 100644
 --- a/pcsx2/CMakeLists.txt
 +++ b/pcsx2/CMakeLists.txt
 @@ -817,6 +817,9 @@ set(pcsx2DebugToolsSources
@@ -52,7 +52,7 @@ index 4c8ce81..e796102 100644
  
  set(pcsx2HostSources
 diff --git a/pcsx2/Counters.cpp b/pcsx2/Counters.cpp
-index 6b66726..c8e42e5 100644
+index 6b66726ddaef6ef11e62607fcb2b975154764557..c8e42e5238d97b2b0304de5229c0630a0619487a 100644
 --- a/pcsx2/Counters.cpp
 +++ b/pcsx2/Counters.cpp
 @@ -7,6 +7,8 @@
@@ -75,7 +75,7 @@ index 6b66726..c8e42e5 100644
  	VMManager::Internal::PollInputOnCPUThread();
  
 diff --git a/pcsx2/GS.cpp b/pcsx2/GS.cpp
-index a16d1b9..9a72202 100644
+index a16d1b924d3e4ada43b0ca5986c6184dc2193c8b..9a72202dbbb53d78e2e76c6c96eb8f04c8b65baa 100644
 --- a/pcsx2/GS.cpp
 +++ b/pcsx2/GS.cpp
 @@ -331,6 +331,7 @@ void gsPostVsyncStart()
@@ -87,7 +87,7 @@ index a16d1b9..9a72202 100644
  }
  
 diff --git a/pcsx2/Gif.cpp b/pcsx2/Gif.cpp
-index 72c2870..8b109ce 100644
+index 72c2870e545fefc3b10d5f27f23e4c30ff268219..8b109ce016910678f5c1519edc189feb514bd8ae 100644
 --- a/pcsx2/Gif.cpp
 +++ b/pcsx2/Gif.cpp
 @@ -464,6 +464,7 @@ void GIFdma()
@@ -99,7 +99,7 @@ index 72c2870..8b109ce 100644
  
  	gif.gspath3done = false; // For some reason this doesn't clear? So when the system starts the thread, we will clear it :)
 diff --git a/pcsx2/Gif_Unit.h b/pcsx2/Gif_Unit.h
-index 6b6fde5..b1b10db 100644
+index 6b6fde5d5ac4b42c066e5968b97aa6a3f365ee11..b1b10db2b2d8db3963dc3c02c0583f7cde953d49 100644
 --- a/pcsx2/Gif_Unit.h
 +++ b/pcsx2/Gif_Unit.h
 @@ -8,6 +8,7 @@
@@ -135,7 +135,7 @@ index 6b6fde5..b1b10db 100644
  		size -= Execute(tranType == GIF_TRANS_DMA, false);
  		return size;
 diff --git a/pcsx2/Interpreter.cpp b/pcsx2/Interpreter.cpp
-index 4faad6c..6c557f0 100644
+index 4faad6c99691f2d4c11f8f1953efdd4e5eda6a64..6c557f073d3877de32d77e5a27b7c6da9a64e1e2 100644
 --- a/pcsx2/Interpreter.cpp
 +++ b/pcsx2/Interpreter.cpp
 @@ -8,6 +8,7 @@
@@ -155,7 +155,7 @@ index 4faad6c..6c557f0 100644
  	// and it expects the PC counter to be pre-incremented
  	cpuRegs.pc += 4;
 diff --git a/pcsx2/MTGS.cpp b/pcsx2/MTGS.cpp
-index 59f5aa0..29a9c97 100644
+index 59f5aa029f5b87df02e94c4ebc2fbccbb56eafca..29a9c9753d842969814756224d4e036be525e917 100644
 --- a/pcsx2/MTGS.cpp
 +++ b/pcsx2/MTGS.cpp
 @@ -1064,6 +1064,8 @@ void Gif_AddGSPacketMTVU(GS_Packet& gsPack, GIF_PATH path)
@@ -168,7 +168,7 @@ index 59f5aa0..29a9c97 100644
  	{
  		MTGS::PrepDataPacket(path, gsPack.size / 16);
 diff --git a/pcsx2/R3000A.cpp b/pcsx2/R3000A.cpp
-index 331259a..1880c66 100644
+index 331259ac0d3f255bf41167be80a2d3f8ef01b696..1a75d18c359046495cf89b216c1ff7fb2fa75248 100644
 --- a/pcsx2/R3000A.cpp
 +++ b/pcsx2/R3000A.cpp
 @@ -7,6 +7,7 @@
@@ -179,22 +179,17 @@ index 331259a..1880c66 100644
  #include "R5900OpcodeTables.h"
  #include "IopCounters.h"
  #include "IopBios.h"
-@@ -275,11 +276,11 @@ inline bool psxIsBranchOrJump(u32 addr)
- int psxIsBreakpointNeeded(u32 addr)
- {
- 	int bpFlags = 0;
--	if (CBreakPoints::IsAddressBreakPoint(BREAKPOINT_IOP, addr))
-+	if (CBreakPoints::IsAddressBreakPoint(BREAKPOINT_IOP, addr) || SpuTrace::IsIopRecProbe(addr))
- 		bpFlags += 1;
- 
+@@ -281,6 +282,8 @@ int psxIsBreakpointNeeded(u32 addr)
  	// there may be a breakpoint in the delay slot
--	if (psxIsBranchOrJump(addr) && CBreakPoints::IsAddressBreakPoint(BREAKPOINT_IOP, addr + 4))
-+	if (psxIsBranchOrJump(addr) && (CBreakPoints::IsAddressBreakPoint(BREAKPOINT_IOP, addr + 4) || SpuTrace::IsIopRecProbe(addr + 4)))
+ 	if (psxIsBranchOrJump(addr) && CBreakPoints::IsAddressBreakPoint(BREAKPOINT_IOP, addr + 4))
  		bpFlags += 2;
++	if (SpuTrace::g_iopRecProbing)
++		bpFlags |= SpuTrace::IopRecProbeFlags(addr, psxIsBranchOrJump(addr));
  
  	return bpFlags;
+ }
 diff --git a/pcsx2/R3000AInterpreter.cpp b/pcsx2/R3000AInterpreter.cpp
-index 5a5ef1b..1bd3490 100644
+index 5a5ef1b52ad4cb8b6b7b5f01da8de756e410df6b..1bd349029693e7d3ae07b16e819b41d569d1a91a 100644
 --- a/pcsx2/R3000AInterpreter.cpp
 +++ b/pcsx2/R3000AInterpreter.cpp
 @@ -8,6 +8,7 @@
@@ -214,7 +209,7 @@ index 5a5ef1b..1bd3490 100644
  
  		PSXCPU_LOG("%s", disR3000AF(psxRegs.code, psxRegs.pc));
 diff --git a/pcsx2/R5900.cpp b/pcsx2/R5900.cpp
-index 0835fc2..9f36f09 100644
+index 0835fc2c8217928fb925b3c67474f5147286a288..e1ea651403a1d038f0bb6184a017e1f958b87955 100644
 --- a/pcsx2/R5900.cpp
 +++ b/pcsx2/R5900.cpp
 @@ -24,6 +24,7 @@
@@ -225,22 +220,17 @@ index 0835fc2..9f36f09 100644
  #include "DebugTools/MIPSAnalyst.h"
  #include "DebugTools/SymbolGuardian.h"
  #include "R5900OpcodeTables.h"
-@@ -792,11 +793,11 @@ inline bool isBranchOrJump(u32 addr)
- int isBreakpointNeeded(u32 addr)
- {
- 	int bpFlags = 0;
--	if (CBreakPoints::IsAddressBreakPoint(BREAKPOINT_EE, addr))
-+	if (CBreakPoints::IsAddressBreakPoint(BREAKPOINT_EE, addr) || GifTrace::IsRecProbe(addr))
- 		bpFlags += 1;
- 
+@@ -798,6 +799,8 @@ int isBreakpointNeeded(u32 addr)
  	// there may be a breakpoint in the delay slot
--	if (isBranchOrJump(addr) && CBreakPoints::IsAddressBreakPoint(BREAKPOINT_EE, addr+4))
-+	if (isBranchOrJump(addr) && (CBreakPoints::IsAddressBreakPoint(BREAKPOINT_EE, addr+4) || GifTrace::IsRecProbe(addr+4)))
+ 	if (isBranchOrJump(addr) && CBreakPoints::IsAddressBreakPoint(BREAKPOINT_EE, addr+4))
  		bpFlags += 2;
++	if (GifTrace::g_recProbing)
++		bpFlags |= GifTrace::RecProbeFlags(addr, isBranchOrJump(addr));
  
  	return bpFlags;
+ }
 diff --git a/pcsx2/SPU2/Dma.cpp b/pcsx2/SPU2/Dma.cpp
-index 0027a59..081e435 100644
+index 0027a59fef84f92eb9540a0fd999a1c5b5fe57d9..b7da594e5a661003a572f58a97a44a1458f3394f 100644
 --- a/pcsx2/SPU2/Dma.cpp
 +++ b/pcsx2/SPU2/Dma.cpp
 @@ -4,6 +4,7 @@
@@ -251,29 +241,23 @@ index 0027a59..081e435 100644
  #include "SPU2/spu2.h"
  #include "R3000A.h"
  #include "IopHw.h"
-@@ -120,7 +121,10 @@ void V_Core::AutoDMAReadBuffer(int mode) //mode: 0= split stereo; 1 = do not spl
+@@ -119,6 +120,7 @@ void V_Core::AutoDMAReadBuffer(int mode) //mode: 0= split stereo; 1 = do not spl
+ 
  	if (mode)
  	{
++		SpuTrace::OnAdmaRam(Index, 0x2000 + (Index << 10) + spos, DMAPtr, InputDataProgress, size);
  		if (DMAPtr != nullptr)
-+		{
-+			SpuTrace::OnAdmaRam(Index, 0x2000 + (Index << 10) + spos, DMAPtr + InputDataProgress, size);
  			memcpy(GetMemPtr(0x2000 + (Index << 10) + spos), DMAPtr + InputDataProgress, size);
-+		}
  		MADR += size;
- 		InputDataLeft -= 0x200;
- 		InputDataProgress += 0x200;
-@@ -135,7 +139,10 @@ void V_Core::AutoDMAReadBuffer(int mode) //mode: 0= split stereo; 1 = do not spl
+@@ -134,6 +136,7 @@ void V_Core::AutoDMAReadBuffer(int mode) //mode: 0= split stereo; 1 = do not spl
+ 			else
  				spos &= ~0x200;
  
++			SpuTrace::OnAdmaRam(Index, 0x2000 + (Index << 10) + spos, DMAPtr, InputDataProgress, 0x200);
  			if (DMAPtr != nullptr)
-+			{
-+				SpuTrace::OnAdmaRam(Index, 0x2000 + (Index << 10) + spos, DMAPtr + InputDataProgress, 0x200);
  				memcpy(GetMemPtr(0x2000 + (Index << 10) + spos), DMAPtr + InputDataProgress, 0x200);
-+			}
  			InputDataTransferred += 0x200;
- 			InputDataLeft -= 0x100;
- 			InputDataProgress += 0x100;
-@@ -277,6 +284,7 @@ void V_Core::FinishDMAwrite()
+@@ -277,6 +280,7 @@ void V_Core::FinishDMAwrite()
  	// It starts at TSA and goes to buff1end.
  
  	const u32 buff1size = (buff1end - ActiveTSA);
@@ -281,7 +265,7 @@ index 0027a59..081e435 100644
  	memcpy(GetMemPtr(ActiveTSA), DMAPtr, buff1size * 2);
  
  	u32 TDA;
-@@ -298,6 +306,7 @@ void V_Core::FinishDMAwrite()
+@@ -298,6 +302,7 @@ void V_Core::FinishDMAwrite()
  		ActiveTSA = 0;
  		// Emulation Grayarea: Should addresses wrap around to zero, or wrap around to
  		// 0x2800?  Hard to know for sure (almost no games depend on this)
@@ -290,7 +274,7 @@ index 0027a59..081e435 100644
  		TDA = (buff2end) & 0xfffff;
  
 diff --git a/pcsx2/SPU2/Mixer.cpp b/pcsx2/SPU2/Mixer.cpp
-index 6e3dabc..70f476f 100644
+index 6e3dabc451ba228b4b80f0622ca6884be886bbcc..70f476f78b2dd8c4a4dd1b59b45160ec2703084a 100644
 --- a/pcsx2/SPU2/Mixer.cpp
 +++ b/pcsx2/SPU2/Mixer.cpp
 @@ -6,6 +6,7 @@
@@ -329,7 +313,7 @@ index 6e3dabc..70f476f 100644
  
  	// Update AutoDMA output positioning
 diff --git a/pcsx2/SPU2/spu2.cpp b/pcsx2/SPU2/spu2.cpp
-index 2c7a5f8..985dc43 100644
+index 2c7a5f805b6908230d648f8396ddce3548027264..985dc43da7fea9d249c2ec51cb375f054db7f957 100644
 --- a/pcsx2/SPU2/spu2.cpp
 +++ b/pcsx2/SPU2/spu2.cpp
 @@ -5,6 +5,7 @@
@@ -365,7 +349,7 @@ index 2c7a5f8..985dc43 100644
  	if (rmem >> 16 == 0x1f80)
  		Cores[0].WriteRegPS1(rmem, value);
 diff --git a/pcsx2/Vif1_Dma.cpp b/pcsx2/Vif1_Dma.cpp
-index c85af24..7402a05 100644
+index c85af242479f72f7170ce97dcb37c822470a19e2..7402a050ebe600d662b115fce8188685c93b5a68 100644
 --- a/pcsx2/Vif1_Dma.cpp
 +++ b/pcsx2/Vif1_Dma.cpp
 @@ -473,6 +473,7 @@ __fi void vif1Interrupt()
@@ -377,7 +361,7 @@ index c85af24..7402a05 100644
  			"        tadr = %lx, asr0 = %lx, asr1 = %lx",
  		vif1ch.chcr._u32, vif1ch.madr, vif1ch.qwc,
 diff --git a/pcsx2/x86/iR3000A.cpp b/pcsx2/x86/iR3000A.cpp
-index a7d0d7e..539271a 100644
+index a7d0d7ef9a67bb98a17a63fdb98bf322eb830a02..a68325fb1fb653302a01c23d4192ec9e15d59387 100644
 --- a/pcsx2/x86/iR3000A.cpp
 +++ b/pcsx2/x86/iR3000A.cpp
 @@ -6,6 +6,7 @@
@@ -388,21 +372,17 @@ index a7d0d7e..539271a 100644
  #include "IopBios.h"
  #include "IopHw.h"
  #include "Common.h"
-@@ -1327,6 +1328,12 @@ void rpsxBREAK()
+@@ -1327,6 +1328,8 @@ void rpsxBREAK()
  static bool psxDynarecCheckBreakpoint()
  {
  	u32 pc = psxRegs.pc;
-+	if (SpuTrace::g_iopRecProbing)
-+	{
-+		SpuTrace::IopRecCheck(pc);
-+		if (!CBreakPoints::IsAddressBreakPoint(BREAKPOINT_IOP, pc) && !CBreakPoints::IsAddressBreakPoint(BREAKPOINT_IOP, pc + 4))
-+			return false;
-+	}
++	if (SpuTrace::IopRecProbeOnly(pc))
++		return false;
  	if (CBreakPoints::CheckSkipFirst(BREAKPOINT_IOP, pc) == pc)
  	{
  		CBreakPoints::ClearSkipFirst(BREAKPOINT_IOP);
 diff --git a/pcsx2/x86/ix86-32/iR5900.cpp b/pcsx2/x86/ix86-32/iR5900.cpp
-index 026197c..071e171 100644
+index 026197ca93395a3ec603faca319734304378f29e..c4a8421c0ed30095ff61f44cf6d2b8d0c168ac04 100644
 --- a/pcsx2/x86/ix86-32/iR5900.cpp
 +++ b/pcsx2/x86/ix86-32/iR5900.cpp
 @@ -4,6 +4,7 @@
@@ -413,16 +393,12 @@ index 026197c..071e171 100644
  #include "Elfheader.h"
  #include "GS.h"
  #include "Host.h"
-@@ -1527,6 +1528,12 @@ bool COP2IsQOP(u32 code)
+@@ -1527,6 +1528,8 @@ bool COP2IsQOP(u32 code)
  void dynarecCheckBreakpoint()
  {
  	u32 pc = cpuRegs.pc;
-+	if (GifTrace::g_recProbing)
-+	{
-+		GifTrace::RecCheck(pc);
-+		if (!CBreakPoints::IsAddressBreakPoint(BREAKPOINT_EE, pc) && !CBreakPoints::IsAddressBreakPoint(BREAKPOINT_EE, pc + 4))
-+			return;
-+	}
++	if (GifTrace::RecProbeOnly(pc))
++		return;
  	if (CBreakPoints::CheckSkipFirst(BREAKPOINT_EE, pc) != 0)
  	{
  		CBreakPoints::ClearSkipFirst(BREAKPOINT_EE);

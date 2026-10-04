@@ -8,7 +8,8 @@ The server starts and stops in the Qt host, not in VMManager: pcsx2-gsrunner sha
 and must not open the debug port.
 
 python Emulator/MakeHooks.py <pcsx2 tree>
-Then, inside the tree: git diff > hooks.patch
+Then, inside the tree: git diff --full-index > hooks.patch (full blob ids let ApplyHooks.py
+merge the hooks three-way into another PCSX2 version).
 """
 import sys
 from pathlib import Path
@@ -66,19 +67,15 @@ EDITS = {
     "pcsx2/R5900.cpp": [
         ('#include "DebugTools/Breakpoints.h"\n',
          '#include "DebugTools/Breakpoints.h"\n#include "DebugTools/GifTrace.h"\n'),
-        ('\tif (CBreakPoints::IsAddressBreakPoint(BREAKPOINT_EE, addr))\n\t\tbpFlags += 1;\n',
-         '\tif (CBreakPoints::IsAddressBreakPoint(BREAKPOINT_EE, addr) || GifTrace::IsRecProbe(addr))\n\t\tbpFlags += 1;\n'),
-        ('\tif (isBranchOrJump(addr) && CBreakPoints::IsAddressBreakPoint(BREAKPOINT_EE, addr+4))\n',
-         '\tif (isBranchOrJump(addr) && (CBreakPoints::IsAddressBreakPoint(BREAKPOINT_EE, addr+4) || GifTrace::IsRecProbe(addr+4)))\n'),
+        ('\t\tbpFlags += 2;\n\n\treturn bpFlags;\n',
+         '\t\tbpFlags += 2;\n\tif (GifTrace::g_recProbing)\n\t\tbpFlags |= GifTrace::RecProbeFlags(addr, isBranchOrJump(addr));\n\n\treturn bpFlags;\n'),
     ],
     "pcsx2/x86/ix86-32/iR5900.cpp": [
         ('#include "DebugTools/Breakpoints.h"\n',
          '#include "DebugTools/Breakpoints.h"\n#include "DebugTools/GifTrace.h"\n'),
         ('void dynarecCheckBreakpoint()\n{\n\tu32 pc = cpuRegs.pc;\n',
          'void dynarecCheckBreakpoint()\n{\n\tu32 pc = cpuRegs.pc;\n'
-         '\tif (GifTrace::g_recProbing)\n\t{\n\t\tGifTrace::RecCheck(pc);\n'
-         '\t\tif (!CBreakPoints::IsAddressBreakPoint(BREAKPOINT_EE, pc) && !CBreakPoints::IsAddressBreakPoint(BREAKPOINT_EE, pc + 4))\n'
-         '\t\t\treturn;\n\t}\n'),
+         '\tif (GifTrace::RecProbeOnly(pc))\n\t\treturn;\n'),
     ],
     # The capture schedule: pad changes, memory writes and probe windows take effect at the start
     # of a frame, after the vsync is recorded and before the EE runs the frame.
@@ -116,11 +113,11 @@ EDITS = {
         ('\t\tmemcpy(GetMemPtr(0), DMAPtr, buff2end * 2);\n',
          '\t\tSpuTrace::OnRam(Index, 0, DMAPtr, buff2end);\n\t\tmemcpy(GetMemPtr(0), DMAPtr, buff2end * 2);\n'),
         ('\t\tif (DMAPtr != nullptr)\n\t\t\tmemcpy(GetMemPtr(0x2000 + (Index << 10) + spos), DMAPtr + InputDataProgress, size);\n',
-         '\t\tif (DMAPtr != nullptr)\n\t\t{\n\t\t\tSpuTrace::OnAdmaRam(Index, 0x2000 + (Index << 10) + spos, DMAPtr + InputDataProgress, size);\n'
-         '\t\t\tmemcpy(GetMemPtr(0x2000 + (Index << 10) + spos), DMAPtr + InputDataProgress, size);\n\t\t}\n'),
+         '\t\tSpuTrace::OnAdmaRam(Index, 0x2000 + (Index << 10) + spos, DMAPtr, InputDataProgress, size);\n'
+         '\t\tif (DMAPtr != nullptr)\n\t\t\tmemcpy(GetMemPtr(0x2000 + (Index << 10) + spos), DMAPtr + InputDataProgress, size);\n'),
         ('\t\t\tif (DMAPtr != nullptr)\n\t\t\t\tmemcpy(GetMemPtr(0x2000 + (Index << 10) + spos), DMAPtr + InputDataProgress, 0x200);\n',
-         '\t\t\tif (DMAPtr != nullptr)\n\t\t\t{\n\t\t\t\tSpuTrace::OnAdmaRam(Index, 0x2000 + (Index << 10) + spos, DMAPtr + InputDataProgress, 0x200);\n'
-         '\t\t\t\tmemcpy(GetMemPtr(0x2000 + (Index << 10) + spos), DMAPtr + InputDataProgress, 0x200);\n\t\t\t}\n'),
+         '\t\t\tSpuTrace::OnAdmaRam(Index, 0x2000 + (Index << 10) + spos, DMAPtr, InputDataProgress, 0x200);\n'
+         '\t\t\tif (DMAPtr != nullptr)\n\t\t\t\tmemcpy(GetMemPtr(0x2000 + (Index << 10) + spos), DMAPtr + InputDataProgress, 0x200);\n'),
     ],
     "pcsx2/SPU2/Mixer.cpp": [
         ('#include "SPU2/interpolate_table.h"\n',
@@ -143,19 +140,15 @@ EDITS = {
     "pcsx2/R3000A.cpp": [
         ('#include "DebugTools/Breakpoints.h"\n',
          '#include "DebugTools/Breakpoints.h"\n#include "DebugTools/SpuTrace.h"\n'),
-        ('\tif (CBreakPoints::IsAddressBreakPoint(BREAKPOINT_IOP, addr))\n\t\tbpFlags += 1;\n',
-         '\tif (CBreakPoints::IsAddressBreakPoint(BREAKPOINT_IOP, addr) || SpuTrace::IsIopRecProbe(addr))\n\t\tbpFlags += 1;\n'),
-        ('\tif (psxIsBranchOrJump(addr) && CBreakPoints::IsAddressBreakPoint(BREAKPOINT_IOP, addr + 4))\n',
-         '\tif (psxIsBranchOrJump(addr) && (CBreakPoints::IsAddressBreakPoint(BREAKPOINT_IOP, addr + 4) || SpuTrace::IsIopRecProbe(addr + 4)))\n'),
+        ('\t\tbpFlags += 2;\n\n\treturn bpFlags;\n',
+         '\t\tbpFlags += 2;\n\tif (SpuTrace::g_iopRecProbing)\n\t\tbpFlags |= SpuTrace::IopRecProbeFlags(addr, psxIsBranchOrJump(addr));\n\n\treturn bpFlags;\n'),
     ],
     "pcsx2/x86/iR3000A.cpp": [
         ('#include "R5900OpcodeTables.h"\n',
          '#include "R5900OpcodeTables.h"\n#include "DebugTools/SpuTrace.h"\n'),
         ('static bool psxDynarecCheckBreakpoint()\n{\n\tu32 pc = psxRegs.pc;\n',
          'static bool psxDynarecCheckBreakpoint()\n{\n\tu32 pc = psxRegs.pc;\n'
-         '\tif (SpuTrace::g_iopRecProbing)\n\t{\n\t\tSpuTrace::IopRecCheck(pc);\n'
-         '\t\tif (!CBreakPoints::IsAddressBreakPoint(BREAKPOINT_IOP, pc) && !CBreakPoints::IsAddressBreakPoint(BREAKPOINT_IOP, pc + 4))\n'
-         '\t\t\treturn false;\n\t}\n'),
+         '\tif (SpuTrace::IopRecProbeOnly(pc))\n\t\treturn false;\n'),
     ],
 }
 

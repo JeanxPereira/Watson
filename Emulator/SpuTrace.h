@@ -60,6 +60,11 @@ namespace SpuTrace
 	void IopExec(u32 pc);
 	bool IsIopRecProbe(u32 pc);
 	void IopRecCheck(u32 pc);
+	// psxIsBreakpointNeeded's flags for the probes at addr and, after a branch, in its delay slot.
+	int IopRecProbeFlags(u32 addr, bool branch);
+	// Called by the IOP recompiler's breakpoint check: records the probes at pc; true when no real
+	// breakpoint there needs the check to go on.
+	bool IopRecProbeOnly(u32 pc);
 
 	// Called by SPU2write after the mixer has caught up with the IOP, before the write lands.
 	__fi void OnWrite(u32 address, u16 value) { if (g_active) Write(address, value); }
@@ -67,7 +72,12 @@ namespace SpuTrace
 	__fi void OnDma(u32 core, const u16* mem, u32 words) { if (g_active) Dma(core, mem, words); }
 	// Called before each copy into SPU2 RAM: `address` and `words` count halfwords.
 	__fi void OnRam(u32 core, u32 address, const u16* mem, u32 words) { if (g_active) Ram(core, "dma", address, mem, words); }
-	__fi void OnAdmaRam(u32 core, u32 address, const u16* mem, u32 bytes) { if (g_active) Ram(core, "adma", address, mem, bytes / 2); }
+	// The ADMA copy reads `bytes` at base + offset halfwords, and only when base is set.
+	__fi void OnAdmaRam(u32 core, u32 address, const u16* base, u32 offset, u32 bytes)
+	{
+		if (g_active && base != nullptr)
+			Ram(core, "adma", address, base + offset, bytes / 2);
+	}
 	// Called by the mixer for each core at each sample, then for the core 0 output, then for the final output.
 	__fi void OnCoreMix(u32 core, s32 dryL, s32 dryR, s32 wetL, s32 wetR, s32 preL, s32 preR, s32 postL, s32 postR, s32 mixL, s32 mixR)
 	{

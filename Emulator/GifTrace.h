@@ -88,6 +88,11 @@ namespace GifTrace
 	void Exec(u32 pc);
 	bool IsRecProbe(u32 pc);
 	void RecCheck(u32 pc);
+	// isBreakpointNeeded's flags for the probes at addr and, after a branch, in its delay slot.
+	int RecProbeFlags(u32 addr, bool branch);
+	// Called by the recompiler's breakpoint check: records the probes at pc; true when no real
+	// breakpoint there needs the check to go on.
+	bool RecProbeOnly(u32 pc);
 
 	__fi void OnOrigin(u32 channel) { if (g_active) Origin(channel); }
 	__fi void OnData(u32 transferType, const u8* mem, u32 size) { if (g_active) Data(transferType, mem, size); }

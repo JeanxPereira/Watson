@@ -2,6 +2,7 @@
 
 #include "GifTrace.h"
 
+#include "Breakpoints.h"
 #include "DebugInterface.h"
 #include "MipsStackWalk.h"
 
@@ -506,6 +507,19 @@ namespace GifTrace
 		Exec(pc);
 		if (find(pc + 4) && (R5900::GetInstruction(memRead32(pc)).flags & IS_BRANCH))
 			Exec(pc + 4);
+	}
+
+	int RecProbeFlags(u32 addr, bool branch)
+	{
+		return (IsRecProbe(addr) ? 1 : 0) | (branch && IsRecProbe(addr + 4) ? 2 : 0);
+	}
+
+	bool RecProbeOnly(u32 pc)
+	{
+		if (!g_recProbing)
+			return false;
+		RecCheck(pc);
+		return !CBreakPoints::IsAddressBreakPoint(BREAKPOINT_EE, pc) && !CBreakPoints::IsAddressBreakPoint(BREAKPOINT_EE, pc + 4);
 	}
 
 	std::string Start(const std::string& path, const std::string& probes, bool recompiled, bool context,

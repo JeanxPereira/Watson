@@ -39,9 +39,12 @@ if ($Holder) {
     Fail "port $Port is already held by $($Process.Path) (pid $($Holder.OwningProcess)); close it first"
 }
 
-$Dependencies = Join-Path $References 'pcsx2\deps\bin'
-if (-not (Test-Path (Join-Path $Dependencies 'Qt6Core.dll'))) { Fail "no Qt runtime in $Dependencies; run Emulator/Build.ps1" }
-$env:PATH = "$Dependencies;$env:PATH"
+# A release build carries its Qt runtime beside the executable; a local build finds it in the deps.
+if (-not (Test-Path (Join-Path (Split-Path -Parent $Exe) 'Qt6Core.dll'))) {
+    $Dependencies = Join-Path $References 'pcsx2\deps\bin'
+    if (-not (Test-Path (Join-Path $Dependencies 'Qt6Core.dll'))) { Fail "no Qt runtime in $Dependencies; run Emulator/Build.ps1" }
+    $env:PATH = "$Dependencies;$env:PATH"
+}
 
 if ($Instance -gt 0 -and -not (Test-Path $Ini) -and (Test-Path (Join-Path $Shared 'PCSX2\inis\PCSX2.ini'))) {
     foreach ($Name in 'inis', 'memcards') {

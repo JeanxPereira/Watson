@@ -25,6 +25,21 @@ EDITS = {
          '\tdestroyBackgroundControllerPollTimer();\n\tDebugServer::Stop();\n'
          '\tVMManager::Internal::CPUThreadShutdown();\n'),
     ],
+    "pcsx2-gsrunner/Main.cpp": [
+        ('			s_settings_interface.SetStringValue("EmuCore/GS", "SWDumpDirectory", dumpdir.c_str());
+		
+',
+         '			s_settings_interface.SetStringValue("EmuCore/GS", "SWDumpDirectory", dumpdir.c_str());
+		
+'
+         '		// Without -dumprange the draw cap would stop every dump after the first 5000 draws.
+'
+         '		if (!s_settings_interface.ContainsValue("EmuCore/GS", "SaveDrawCount"))
+'
+         '			s_settings_interface.SetIntValue("EmuCore/GS", "SaveDrawCount", -1);
+
+'),
+    ],
     "pcsx2/CMakeLists.txt": [
         ('\tDebugTools/BiosDebugData.cpp)\n',
          '\tDebugTools/DebugServer.cpp\n\tDebugTools/GifTrace.cpp\n\tDebugTools/SpuTrace.cpp\n\tDebugTools/BiosDebugData.cpp)\n'),

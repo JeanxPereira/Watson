@@ -26,19 +26,10 @@ EDITS = {
          '\tVMManager::Internal::CPUThreadShutdown();\n'),
     ],
     "pcsx2-gsrunner/Main.cpp": [
-        ('			s_settings_interface.SetStringValue("EmuCore/GS", "SWDumpDirectory", dumpdir.c_str());
-		
-',
-         '			s_settings_interface.SetStringValue("EmuCore/GS", "SWDumpDirectory", dumpdir.c_str());
-		
-'
-         '		// Without -dumprange the draw cap would stop every dump after the first 5000 draws.
-'
-         '		if (!s_settings_interface.ContainsValue("EmuCore/GS", "SaveDrawCount"))
-'
-         '			s_settings_interface.SetIntValue("EmuCore/GS", "SaveDrawCount", -1);
-
-'),
+        ('\tstd::string dumpdir; // Save from argument -dumpdir for creating sub-directories\n',
+         '\t// The default draw cap stops every dump after the first 5000 draws; -dumprange and -ini set their own.\n'
+         '\ts_settings_interface.SetIntValue("EmuCore/GS", "SaveDrawCount", -1);\n'
+         '\tstd::string dumpdir; // Save from argument -dumpdir for creating sub-directories\n'),
     ],
     "pcsx2/CMakeLists.txt": [
         ('\tDebugTools/BiosDebugData.cpp)\n',

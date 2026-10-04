@@ -1,18 +1,16 @@
 diff --git a/pcsx2-gsrunner/Main.cpp b/pcsx2-gsrunner/Main.cpp
-index 3e10aece98cd550e2c3bf56f302b8637a7d8d113..b26769c8da2a0b2cc1a2af2e6ba1678a17e91af9 100644
+index 3e10aece98cd550e2c3bf56f302b8637a7d8d113..e0eb84509643b9943cd4fc06359384160a5a8056 100644
 --- a/pcsx2-gsrunner/Main.cpp
 +++ b/pcsx2-gsrunner/Main.cpp
-@@ -771,6 +771,10 @@ bool GSRunner::ParseCommandLineArgs(int argc, char* argv[], VMBootParameters& pa
- 		if (s_settings_interface.GetStringValue("EmuCore/GS", "SWDumpDirectory").empty())
- 			s_settings_interface.SetStringValue("EmuCore/GS", "SWDumpDirectory", dumpdir.c_str());
- 		
-+		// Without -dumprange the draw cap would stop every dump after the first 5000 draws.
-+		if (!s_settings_interface.ContainsValue("EmuCore/GS", "SaveDrawCount"))
-+			s_settings_interface.SetIntValue("EmuCore/GS", "SaveDrawCount", -1);
-+
- 		// Disable saving frames with SaveSnapshotToMemory()
- 		// Instead we save more "raw" snapshots when using -dump.
- 		s_output_prefix = "";
+@@ -449,6 +449,8 @@ void GSRunner::InitializeConsole()
+ 
+ bool GSRunner::ParseCommandLineArgs(int argc, char* argv[], VMBootParameters& params)
+ {
++	// The default draw cap stops every dump after the first 5000 draws; -dumprange and -ini set their own.
++	s_settings_interface.SetIntValue("EmuCore/GS", "SaveDrawCount", -1);
+ 	std::string dumpdir; // Save from argument -dumpdir for creating sub-directories
+ 	bool no_more_args = false;
+ 	for (int i = 1; i < argc; i++)
 diff --git a/pcsx2-qt/QtHost.cpp b/pcsx2-qt/QtHost.cpp
 index a177f3980f0dc1297b1d560dc73dd6baaf8b0463..8758bf9a1d9f25b9ccded4a40a72ca7e44d510f7 100644
 --- a/pcsx2-qt/QtHost.cpp

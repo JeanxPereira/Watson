@@ -7,9 +7,9 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
-const TREE = process.env.WATSON_PCSX2_TREE ?? path.join(ROOT, 'References', 'pcsx2');
-const RUNNER = process.env.WATSON_GSRUNNER ?? path.join(TREE, 'build', 'pcsx2-gsrunner', 'Release', 'pcsx2-gsrunner.exe');
-const DUMP = process.env.WATSON_GSDUMP ?? path.join(ROOT, 'Runtime', 'captures', 'hddosd-110U-opening-full.gs');
+const TREE = path.resolve(process.env.WATSON_PCSX2_TREE ?? path.join(ROOT, 'References', 'pcsx2'));
+const RUNNER = path.resolve(process.env.WATSON_GSRUNNER ?? path.join(TREE, 'build', 'pcsx2-gsrunner', 'Release', 'pcsx2-gsrunner.exe'));
+const DUMP = path.resolve(process.env.WATSON_GSDUMP ?? path.join(ROOT, 'Runtime', 'captures', 'hddosd-110U-opening-full.gs'));
 const FRAME = Number(process.env.WATSON_GSDUMP_FRAME ?? 80);
 const FIRST_DRAW_OF_FRAME_BEYOND_DEFAULT_CAP = 5000;
 const SETTLE_POLLS = 8;
@@ -33,8 +33,9 @@ function dumpFrame(args, out) {
       last = count;
       if (quiet >= SETTLE_POLLS || Date.now() - started > LIMIT_MS) {
         clearInterval(timer);
+        const names = fs.readdirSync(out);
+        child.once('exit', () => resolve(names));
         child.kill();
-        resolve(fs.readdirSync(out));
       }
     }, POLL_MS);
   });

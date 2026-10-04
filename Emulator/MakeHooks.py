@@ -26,9 +26,9 @@ EDITS = {
     ],
     "pcsx2/CMakeLists.txt": [
         ('\tDebugTools/BiosDebugData.cpp)\n',
-         '\tDebugTools/DebugServer.cpp\n\tDebugTools/GifTrace.cpp\n\tDebugTools/BiosDebugData.cpp)\n'),
+         '\tDebugTools/DebugServer.cpp\n\tDebugTools/GifTrace.cpp\n\tDebugTools/SpuTrace.cpp\n\tDebugTools/BiosDebugData.cpp)\n'),
         ('\tDebugTools/BiosDebugData.h)\n',
-         '\tDebugTools/DebugServer.h\n\tDebugTools/GifTrace.h\n\tDebugTools/BiosDebugData.h)\n'),
+         '\tDebugTools/DebugServer.h\n\tDebugTools/GifTrace.h\n\tDebugTools/SpuTrace.h\n\tDebugTools/BiosDebugData.h)\n'),
     ],
     # The trace hooks: data entering a path, bytes a path takes back, a packet entering the
     # MTGS ring, vsync, and the two DMA channels being set going.
@@ -84,9 +84,9 @@ EDITS = {
     # of a frame, after the vsync is recorded and before the EE runs the frame.
     "pcsx2/Counters.cpp": [
         ('#include "Counters.h"\n',
-         '#include "Counters.h"\n#include "DebugTools/GifTrace.h"\n'),
+         '#include "Counters.h"\n#include "DebugTools/GifTrace.h"\n#include "DebugTools/SpuTrace.h"\n'),
         ('\t// Poll input after MTGS frame push, just in case it has to stall to catch up.\n',
-         '\tGifTrace::OnFrameStart();\n\n'
+         '\tGifTrace::OnFrameStart();\n\tSpuTrace::OnFrameStart();\n\n'
          '\t// Poll input after MTGS frame push, just in case it has to stall to catch up.\n'),
     ],
     "pcsx2/Gif.cpp": [
@@ -94,6 +94,68 @@ EDITS = {
     ],
     "pcsx2/Vif1_Dma.cpp": [
         ('void dmaVIF1()\n{\n', 'void dmaVIF1()\n{\n\tGifTrace::OnOrigin(1);\n'),
+    ],
+    # The sound hooks: every SPU2 register write once the mixer has caught up with the IOP, every
+    # DMA4/7 start and every copy into SPU2 RAM, each mixed sample per stage, and the IOP probes
+    # (interpreter before each instruction; recompiler through its breakpoint checks).
+    "pcsx2/SPU2/spu2.cpp": [
+        ('#include "SPU2/Dma.h"\n',
+         '#include "SPU2/Dma.h"\n#include "DebugTools/SpuTrace.h"\n'),
+        ('\tTimeUpdate(psxRegs.cycle);\n\n\tif (rmem >> 16 == 0x1f80)\n\t\tCores[0].WriteRegPS1(rmem, value);\n',
+         '\tTimeUpdate(psxRegs.cycle);\n\tSpuTrace::OnWrite(rmem, value);\n\n\tif (rmem >> 16 == 0x1f80)\n\t\tCores[0].WriteRegPS1(rmem, value);\n'),
+        ('\tCores[0].DoDMAwrite(pMem, size);\n',
+         '\tSpuTrace::OnDma(0, pMem, size);\n\tCores[0].DoDMAwrite(pMem, size);\n'),
+        ('\tCores[1].DoDMAwrite(pMem, size);\n',
+         '\tSpuTrace::OnDma(1, pMem, size);\n\tCores[1].DoDMAwrite(pMem, size);\n'),
+    ],
+    "pcsx2/SPU2/Dma.cpp": [
+        ('#include "SPU2/Dma.h"\n',
+         '#include "SPU2/Dma.h"\n#include "DebugTools/SpuTrace.h"\n'),
+        ('\tmemcpy(GetMemPtr(ActiveTSA), DMAPtr, buff1size * 2);\n',
+         '\tSpuTrace::OnRam(Index, ActiveTSA, DMAPtr, buff1size);\n\tmemcpy(GetMemPtr(ActiveTSA), DMAPtr, buff1size * 2);\n'),
+        ('\t\tmemcpy(GetMemPtr(0), DMAPtr, buff2end * 2);\n',
+         '\t\tSpuTrace::OnRam(Index, 0, DMAPtr, buff2end);\n\t\tmemcpy(GetMemPtr(0), DMAPtr, buff2end * 2);\n'),
+        ('\t\tif (DMAPtr != nullptr)\n\t\t\tmemcpy(GetMemPtr(0x2000 + (Index << 10) + spos), DMAPtr + InputDataProgress, size);\n',
+         '\t\tif (DMAPtr != nullptr)\n\t\t{\n\t\t\tSpuTrace::OnAdmaRam(Index, 0x2000 + (Index << 10) + spos, DMAPtr + InputDataProgress, size);\n'
+         '\t\t\tmemcpy(GetMemPtr(0x2000 + (Index << 10) + spos), DMAPtr + InputDataProgress, size);\n\t\t}\n'),
+        ('\t\t\tif (DMAPtr != nullptr)\n\t\t\t\tmemcpy(GetMemPtr(0x2000 + (Index << 10) + spos), DMAPtr + InputDataProgress, 0x200);\n',
+         '\t\t\tif (DMAPtr != nullptr)\n\t\t\t{\n\t\t\t\tSpuTrace::OnAdmaRam(Index, 0x2000 + (Index << 10) + spos, DMAPtr + InputDataProgress, 0x200);\n'
+         '\t\t\t\tmemcpy(GetMemPtr(0x2000 + (Index << 10) + spos), DMAPtr + InputDataProgress, 0x200);\n\t\t\t}\n'),
+    ],
+    "pcsx2/SPU2/Mixer.cpp": [
+        ('#include "SPU2/interpolate_table.h"\n',
+         '#include "SPU2/interpolate_table.h"\n#include "DebugTools/SpuTrace.h"\n'),
+        ('\treturn TD + ApplyVolume(RV, thiscore.FxVol);\n',
+         '\tconst StereoOut32 Mixed(TD + ApplyVolume(RV, thiscore.FxVol));\n'
+         '\tSpuTrace::OnCoreMix(coreidx, Voices.Dry.Left, Voices.Dry.Right, Voices.Wet.Left, Voices.Wet.Right, TW.Left, TW.Right, RV.Left, RV.Right, Mixed.Left, Mixed.Right);\n'
+         '\treturn Mixed;\n'),
+        ('\tspu2M_WriteFast(0xA00 + OutPos, Ext.Right);\n',
+         '\tspu2M_WriteFast(0xA00 + OutPos, Ext.Right);\n\tSpuTrace::OnCore0Out(Ext.Left, Ext.Right);\n'),
+        ('\tspu2Output(Out);\n',
+         '\tSpuTrace::OnMix(Out.Left, Out.Right);\n\tspu2Output(Out);\n'),
+    ],
+    "pcsx2/R3000AInterpreter.cpp": [
+        ('#include "DebugTools/Breakpoints.h"\n',
+         '#include "DebugTools/Breakpoints.h"\n#include "DebugTools/SpuTrace.h"\n'),
+        ('\tpsxRegs.code = iopMemRead32(psxRegs.pc);\n',
+         '\tSpuTrace::OnIopExec(psxRegs.pc);\n\tpsxRegs.code = iopMemRead32(psxRegs.pc);\n'),
+    ],
+    "pcsx2/R3000A.cpp": [
+        ('#include "DebugTools/Breakpoints.h"\n',
+         '#include "DebugTools/Breakpoints.h"\n#include "DebugTools/SpuTrace.h"\n'),
+        ('\tif (CBreakPoints::IsAddressBreakPoint(BREAKPOINT_IOP, addr))\n\t\tbpFlags += 1;\n',
+         '\tif (CBreakPoints::IsAddressBreakPoint(BREAKPOINT_IOP, addr) || SpuTrace::IsIopRecProbe(addr))\n\t\tbpFlags += 1;\n'),
+        ('\tif (psxIsBranchOrJump(addr) && CBreakPoints::IsAddressBreakPoint(BREAKPOINT_IOP, addr + 4))\n',
+         '\tif (psxIsBranchOrJump(addr) && (CBreakPoints::IsAddressBreakPoint(BREAKPOINT_IOP, addr + 4) || SpuTrace::IsIopRecProbe(addr + 4)))\n'),
+    ],
+    "pcsx2/x86/iR3000A.cpp": [
+        ('#include "R5900OpcodeTables.h"\n',
+         '#include "R5900OpcodeTables.h"\n#include "DebugTools/SpuTrace.h"\n'),
+        ('static bool psxDynarecCheckBreakpoint()\n{\n\tu32 pc = psxRegs.pc;\n',
+         'static bool psxDynarecCheckBreakpoint()\n{\n\tu32 pc = psxRegs.pc;\n'
+         '\tif (SpuTrace::g_iopRecProbing)\n\t{\n\t\tSpuTrace::IopRecCheck(pc);\n'
+         '\t\tif (!CBreakPoints::IsAddressBreakPoint(BREAKPOINT_IOP, pc) && !CBreakPoints::IsAddressBreakPoint(BREAKPOINT_IOP, pc + 4))\n'
+         '\t\t\treturn false;\n\t}\n'),
     ],
 }
 

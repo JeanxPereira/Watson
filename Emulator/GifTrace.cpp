@@ -41,40 +41,9 @@ namespace GifTrace
 		{"l3", PadDualshock2::Inputs::PAD_L3}, {"r3", PadDualshock2::Inputs::PAD_R3},
 	};
 
-	// A range of memory to record at a probe: `length` bytes at base + offset, where base is a
-	// register (or zero for an absolute address), or at the pointer stored there.
-	struct ProbeRange
-	{
-		bool deref;
-		int reg;
-		u32 offset;
-		u32 length;
-	};
-	// One probe as asked for; several may share a program counter, each with its own ranges.
-	// It records only while the capture frame is in [from, until); frame -1 is the part before
-	// the first vsync.
-	struct ProbeSpec
-	{
-		u32 index;
-		s32 from;
-		s32 until;
-		std::vector<ProbeRange> ranges;
-	};
-	struct ProbePoint
-	{
-		u32 pc;
-		std::vector<ProbeSpec> specs;
-	};
 	static std::vector<ProbePoint> s_probes;
 	static std::string s_probeText;
 
-	// Buttons held on port 1 from capture frame `frame` for `frames` frames; `mask` has bit `bind`.
-	struct PadStep
-	{
-		s32 frame;
-		s32 frames;
-		u32 mask;
-	};
 	struct MemoryWrite
 	{
 		s32 frame;
@@ -204,7 +173,7 @@ namespace GifTrace
 		return !CHECK_EEREC && !REC_VU1;
 	}
 
-	static const char* const s_registerNames[32] = {
+	const char* const g_registerNames[32] = {
 		"zero", "at", "v0", "v1", "a0", "a1", "a2", "a3", "t0", "t1", "t2", "t3", "t4", "t5", "t6", "t7",
 		"s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "t8", "t9", "k0", "k1", "gp", "sp", "s8", "ra"};
 
@@ -273,7 +242,7 @@ namespace GifTrace
 	static constexpr u32 MAX_LENGTH = 0x10000;
 
 	// Returns an empty string and fills `out`, or the reason the text is refused.
-	static std::string parseProbes(const std::string& text, std::vector<ProbePoint>* out)
+	std::string ParseProbes(const std::string& text, std::vector<ProbePoint>* out)
 	{
 		out->clear();
 		if (text.empty())
@@ -329,7 +298,7 @@ namespace GifTrace
 					range.reg = -1;
 					for (int index = 0; index < 32; index++)
 					{
-						if (base == s_registerNames[index])
+						if (base == g_registerNames[index])
 							range.reg = index;
 					}
 					if (range.reg < 0)
@@ -379,7 +348,7 @@ namespace GifTrace
 	static constexpr size_t MAX_SCHEDULE = 4096;
 	static constexpr u32 MAX_WRITE = 0x10000;
 
-	static std::string parsePad(const std::string& text, std::vector<PadStep>* out)
+	std::string ParsePad(const std::string& text, std::vector<PadStep>* out)
 	{
 		out->clear();
 		if (text.empty())
@@ -553,7 +522,7 @@ namespace GifTrace
 		std::vector<ProbePoint> points;
 		std::vector<PadStep> steps;
 		std::vector<MemoryWrite> patches;
-		for (const std::string& refused : {parseProbes(probes, &points), parsePad(pad, &steps), parseWrites(writes, &patches)})
+		for (const std::string& refused : {ParseProbes(probes, &points), ParsePad(pad, &steps), parseWrites(writes, &patches)})
 		{
 			if (!refused.empty())
 				return refused;

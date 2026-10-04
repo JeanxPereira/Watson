@@ -8,6 +8,7 @@
 #include "common/Pcsx2Defs.h"
 
 #include <string>
+#include <vector>
 
 namespace GifTrace
 {
@@ -31,6 +32,44 @@ namespace GifTrace
 
 	// The EE and VU1 register files are only current under the interpreters.
 	bool InterpretersActive();
+
+	// A range of memory to record at a probe: `length` bytes at base + offset, where base is a
+	// register (or zero for an absolute address), or at the pointer stored there.
+	struct ProbeRange
+	{
+		bool deref;
+		int reg;
+		u32 offset;
+		u32 length;
+	};
+	// One probe as asked for; several may share a program counter, each with its own ranges.
+	// It records only while the capture frame is in [from, until); frame -1 is the part before
+	// the first vsync.
+	struct ProbeSpec
+	{
+		u32 index;
+		s32 from;
+		s32 until;
+		std::vector<ProbeRange> ranges;
+	};
+	struct ProbePoint
+	{
+		u32 pc;
+		std::vector<ProbeSpec> specs;
+	};
+	// Probe text to probe points sorted by program counter; an empty string, or the reason it is refused.
+	// The EE and the IOP share the grammar and the register names.
+	std::string ParseProbes(const std::string& text, std::vector<ProbePoint>* out);
+	extern const char* const g_registerNames[32];
+
+	// Buttons held on port 1 from capture frame `frame` for `frames` frames; `mask` has bit `bind`.
+	struct PadStep
+	{
+		s32 frame;
+		s32 frames;
+		u32 mask;
+	};
+	std::string ParsePad(const std::string& text, std::vector<PadStep>* out);
 
 	// Pad buttons by name, as the pad commands and the pad schedule take them.
 	struct PadButton

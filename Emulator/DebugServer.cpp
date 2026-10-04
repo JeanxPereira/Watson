@@ -45,6 +45,7 @@ typedef int socket_t;
 
 #include "DebugServer.h"
 #include "GifTrace.h"
+#include "SpuTrace.h"
 #include "DebugInterface.h"
 #include "Breakpoints.h"
 #include "MipsStackWalk.h"
@@ -789,6 +790,12 @@ namespace DebugServer
 				j.startObject();
 				j.kv("name", m.name);
 				j.kv("version", (int64_t)m.version);
+				j.key("text_addr"); j.valHex32(m.text_addr);
+				j.key("entry"); j.valHex32(m.entry);
+				j.key("gp"); j.valHex32(m.gp);
+				j.kv("text_size", (int64_t)m.text_size);
+				j.kv("data_size", (int64_t)m.data_size);
+				j.kv("bss_size", (int64_t)m.bss_size);
 				j.endObject();
 			}
 			j.endArray();
@@ -1026,6 +1033,60 @@ namespace DebugServer
 			j.kv("packets", (int64_t)packets);
 			j.endObject();
 		}
+		// ----- SPU TRACE -----
+		else if (cmd == "spu_trace_start")
+		{
+			// SPU2 register writes, DMA4/7 writes into SPU2 RAM, IOP probes and the mixed output,
+			// from now until spu_trace_stop. `wav` and `stages` are optional output files.
+			SpuTrace::Options options;
+			options.path = wirePath(params, "path");
+			options.wav = wirePath(params, "wav");
+			options.stages = wirePath(params, "stages");
+			options.probes = getStr(params, "probes", "");
+			options.pad = getStr(params, "pad", "");
+			options.dmaData = getBool(params, "dma_data", true);
+			if (options.path.empty())
+				return errorReply("path is required");
+			const std::string refused = SpuTrace::Start(options);
+			if (!refused.empty())
+				return errorReply(refused);
+			j.startObject();
+			j.kv("ok", true);
+			j.kv("iop_recompiler", (bool)CHECK_IOPREC);
+			j.endObject();
+		}
+		else if (cmd == "spu_trace_stop")
+		{
+			SpuTrace::Totals totals{};
+			const std::string failed = SpuTrace::Stop(&totals);
+			if (!failed.empty())
+				return errorReply(failed);
+			j.startObject();
+			j.kv("ok", true);
+			j.kv("writes", (int64_t)totals.writes);
+			j.kv("dmas", (int64_t)totals.dmas);
+			j.kv("samples", (int64_t)totals.samples);
+			j.kv("probes", (int64_t)totals.probes);
+			j.endObject();
+		}
+		// ----- SPU2 STATE -----
+		else if (cmd == "spu_read")
+		{
+			// SPU2 RAM (2 MB, raw), the register mirror (64 KB, raw) and the cores and voices as JSON,
+			// each to its own file; a path left empty is skipped.
+			const std::string ram = wirePath(params, "ram");
+			const std::string regs = wirePath(params, "regs");
+			const std::string state = wirePath(params, "state");
+			if (ram.empty() && regs.empty() && state.empty())
+				return errorReply("give at least one of ram, regs, state");
+			const std::string failed = SpuTrace::ReadState(ram, regs, state);
+			if (!failed.empty())
+				return errorReply(failed);
+			j.startObject();
+			j.kv("ok", true);
+			j.kv("frame", (int64_t)g_FrameCount);
+			j.endObject();
+		}
 		// ----- UNKNOWN COMMAND -----
 		else
 		{
@@ -1043,7 +1104,8 @@ namespace DebugServer
 				"get_threads", "get_modules",
 				"is_valid_address", "clear_breakpoints",
 				"frame_advance", "pad_set", "queue_snapshot", "save_state_file", "load_state_file",
-				"gif_trace_start", "gif_trace_stop", "gs_read", "set_cpu_mode"
+				"gif_trace_start", "gif_trace_stop", "gs_read", "set_cpu_mode",
+				"spu_trace_start", "spu_trace_stop", "spu_read"
 			};
 			for (const char* c : cmds) j.valStr(c);
 			j.endArray();
@@ -1121,7 +1183,7 @@ namespace DebugServer
 			// FrameAdvance switched the VM to Running on the CPU thread; it pauses itself after the
 			// last frame. Allow real time for slow frames: interpreted ones are slower, and a traced
 			// frame walks the stack at every DMA start (about 2 s per frame on the OSDSYS clock).
-			const int perFrame = GifTrace::g_active ? 20000 : (GifTrace::InterpretersActive() ? 2000 : 100);
+			const int perFrame = GifTrace::g_active ? 20000 : ((GifTrace::InterpretersActive() || SpuTrace::g_active) ? 2000 : 100);
 			const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000 + (int)count * perFrame);
 			while (std::chrono::steady_clock::now() < deadline)
 			{

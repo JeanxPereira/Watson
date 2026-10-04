@@ -28,44 +28,48 @@ index a177f39..8758bf9 100644
  
  	// Move back to the UI thread, since we're no longer running.
 diff --git a/pcsx2/CMakeLists.txt b/pcsx2/CMakeLists.txt
-index 4c8ce81..f9d80bc 100644
+index 4c8ce81..e796102 100644
 --- a/pcsx2/CMakeLists.txt
 +++ b/pcsx2/CMakeLists.txt
-@@ -817,6 +817,8 @@ set(pcsx2DebugToolsSources
+@@ -817,6 +817,9 @@ set(pcsx2DebugToolsSources
  	DebugTools/DisR5900asm.cpp
  	DebugTools/DisVU0Micro.cpp
  	DebugTools/DisVU1Micro.cpp
 +	DebugTools/DebugServer.cpp
 +	DebugTools/GifTrace.cpp
++	DebugTools/SpuTrace.cpp
  	DebugTools/BiosDebugData.cpp)
  
  # DebugTools headers
-@@ -835,6 +837,8 @@ set(pcsx2DebugToolsHeaders
+@@ -835,6 +838,9 @@ set(pcsx2DebugToolsHeaders
  	DebugTools/DisASM.h
  	DebugTools/DisVUmicro.h
  	DebugTools/DisVUops.h
 +	DebugTools/DebugServer.h
 +	DebugTools/GifTrace.h
++	DebugTools/SpuTrace.h
  	DebugTools/BiosDebugData.h)
  
  set(pcsx2HostSources
 diff --git a/pcsx2/Counters.cpp b/pcsx2/Counters.cpp
-index 6b66726..de12054 100644
+index 6b66726..c8e42e5 100644
 --- a/pcsx2/Counters.cpp
 +++ b/pcsx2/Counters.cpp
-@@ -7,6 +7,7 @@
+@@ -7,6 +7,8 @@
  #include "Common.h"
  #include "R3000A.h"
  #include "Counters.h"
 +#include "DebugTools/GifTrace.h"
++#include "DebugTools/SpuTrace.h"
  #include "IopCounters.h"
  
  #include "GS.h"
-@@ -501,6 +502,8 @@ static __fi void VSyncStart(u64 sCycle)
+@@ -501,6 +503,9 @@ static __fi void VSyncStart(u64 sCycle)
  		gsPostVsyncStart(); // MUST be after framelimit; doing so before causes funk with frame times!
  	}
  
 +	GifTrace::OnFrameStart();
++	SpuTrace::OnFrameStart();
 +
  	// Poll input after MTGS frame push, just in case it has to stall to catch up.
  	VMManager::Internal::PollInputOnCPUThread();
@@ -163,6 +167,52 @@ index 59f5aa0..29a9c97 100644
  	if (COPY_GS_PACKET_TO_MTGS)
  	{
  		MTGS::PrepDataPacket(path, gsPack.size / 16);
+diff --git a/pcsx2/R3000A.cpp b/pcsx2/R3000A.cpp
+index 331259a..1880c66 100644
+--- a/pcsx2/R3000A.cpp
++++ b/pcsx2/R3000A.cpp
+@@ -7,6 +7,7 @@
+ #include "SIO/Sio0.h"
+ #include "Sif.h"
+ #include "DebugTools/Breakpoints.h"
++#include "DebugTools/SpuTrace.h"
+ #include "R5900OpcodeTables.h"
+ #include "IopCounters.h"
+ #include "IopBios.h"
+@@ -275,11 +276,11 @@ inline bool psxIsBranchOrJump(u32 addr)
+ int psxIsBreakpointNeeded(u32 addr)
+ {
+ 	int bpFlags = 0;
+-	if (CBreakPoints::IsAddressBreakPoint(BREAKPOINT_IOP, addr))
++	if (CBreakPoints::IsAddressBreakPoint(BREAKPOINT_IOP, addr) || SpuTrace::IsIopRecProbe(addr))
+ 		bpFlags += 1;
+ 
+ 	// there may be a breakpoint in the delay slot
+-	if (psxIsBranchOrJump(addr) && CBreakPoints::IsAddressBreakPoint(BREAKPOINT_IOP, addr + 4))
++	if (psxIsBranchOrJump(addr) && (CBreakPoints::IsAddressBreakPoint(BREAKPOINT_IOP, addr + 4) || SpuTrace::IsIopRecProbe(addr + 4)))
+ 		bpFlags += 2;
+ 
+ 	return bpFlags;
+diff --git a/pcsx2/R3000AInterpreter.cpp b/pcsx2/R3000AInterpreter.cpp
+index 5a5ef1b..1bd3490 100644
+--- a/pcsx2/R3000AInterpreter.cpp
++++ b/pcsx2/R3000AInterpreter.cpp
+@@ -8,6 +8,7 @@
+ 
+ #include "R5900OpcodeTables.h"
+ #include "DebugTools/Breakpoints.h"
++#include "DebugTools/SpuTrace.h"
+ #include "IopBios.h"
+ #include "IopHw.h"
+ 
+@@ -226,6 +227,7 @@ static __fi void execI()
+ 		}
+ 	}
+ 
++	SpuTrace::OnIopExec(psxRegs.pc);
+ 	psxRegs.code = iopMemRead32(psxRegs.pc);
+ 
+ 		PSXCPU_LOG("%s", disR3000AF(psxRegs.code, psxRegs.pc));
 diff --git a/pcsx2/R5900.cpp b/pcsx2/R5900.cpp
 index 0835fc2..9f36f09 100644
 --- a/pcsx2/R5900.cpp
@@ -189,6 +239,131 @@ index 0835fc2..9f36f09 100644
  		bpFlags += 2;
  
  	return bpFlags;
+diff --git a/pcsx2/SPU2/Dma.cpp b/pcsx2/SPU2/Dma.cpp
+index 0027a59..081e435 100644
+--- a/pcsx2/SPU2/Dma.cpp
++++ b/pcsx2/SPU2/Dma.cpp
+@@ -4,6 +4,7 @@
+ #include "SPU2/defs.h"
+ #include "SPU2/Debug.h"
+ #include "SPU2/Dma.h"
++#include "DebugTools/SpuTrace.h"
+ #include "SPU2/spu2.h"
+ #include "R3000A.h"
+ #include "IopHw.h"
+@@ -120,7 +121,10 @@ void V_Core::AutoDMAReadBuffer(int mode) //mode: 0= split stereo; 1 = do not spl
+ 	if (mode)
+ 	{
+ 		if (DMAPtr != nullptr)
++		{
++			SpuTrace::OnAdmaRam(Index, 0x2000 + (Index << 10) + spos, DMAPtr + InputDataProgress, size);
+ 			memcpy(GetMemPtr(0x2000 + (Index << 10) + spos), DMAPtr + InputDataProgress, size);
++		}
+ 		MADR += size;
+ 		InputDataLeft -= 0x200;
+ 		InputDataProgress += 0x200;
+@@ -135,7 +139,10 @@ void V_Core::AutoDMAReadBuffer(int mode) //mode: 0= split stereo; 1 = do not spl
+ 				spos &= ~0x200;
+ 
+ 			if (DMAPtr != nullptr)
++			{
++				SpuTrace::OnAdmaRam(Index, 0x2000 + (Index << 10) + spos, DMAPtr + InputDataProgress, 0x200);
+ 				memcpy(GetMemPtr(0x2000 + (Index << 10) + spos), DMAPtr + InputDataProgress, 0x200);
++			}
+ 			InputDataTransferred += 0x200;
+ 			InputDataLeft -= 0x100;
+ 			InputDataProgress += 0x100;
+@@ -277,6 +284,7 @@ void V_Core::FinishDMAwrite()
+ 	// It starts at TSA and goes to buff1end.
+ 
+ 	const u32 buff1size = (buff1end - ActiveTSA);
++	SpuTrace::OnRam(Index, ActiveTSA, DMAPtr, buff1size);
+ 	memcpy(GetMemPtr(ActiveTSA), DMAPtr, buff1size * 2);
+ 
+ 	u32 TDA;
+@@ -298,6 +306,7 @@ void V_Core::FinishDMAwrite()
+ 		ActiveTSA = 0;
+ 		// Emulation Grayarea: Should addresses wrap around to zero, or wrap around to
+ 		// 0x2800?  Hard to know for sure (almost no games depend on this)
++		SpuTrace::OnRam(Index, 0, DMAPtr, buff2end);
+ 		memcpy(GetMemPtr(0), DMAPtr, buff2end * 2);
+ 		TDA = (buff2end) & 0xfffff;
+ 
+diff --git a/pcsx2/SPU2/Mixer.cpp b/pcsx2/SPU2/Mixer.cpp
+index 6e3dabc..70f476f 100644
+--- a/pcsx2/SPU2/Mixer.cpp
++++ b/pcsx2/SPU2/Mixer.cpp
+@@ -6,6 +6,7 @@
+ #include "SPU2/defs.h"
+ #include "SPU2/spu2.h"
+ #include "SPU2/interpolate_table.h"
++#include "DebugTools/SpuTrace.h"
+ 
+ #include "common/Assertions.h"
+ 
+@@ -516,7 +517,9 @@ static __forceinline StereoOut32 MixCore(const uint coreidx, const VoiceMixSet&
+ 
+ 	// Mix Dry + Wet
+ 	// (master volume is applied later to the result of both outputs added together).
+-	return TD + ApplyVolume(RV, thiscore.FxVol);
++	const StereoOut32 Mixed(TD + ApplyVolume(RV, thiscore.FxVol));
++	SpuTrace::OnCoreMix(coreidx, Voices.Dry.Left, Voices.Dry.Right, Voices.Wet.Left, Voices.Wet.Right, TW.Left, TW.Right, RV.Left, RV.Right, Mixed.Left, Mixed.Right);
++	return Mixed;
+ }
+ 
+ void spu2Mix()
+@@ -556,6 +559,7 @@ void spu2Mix()
+ 	// Commit Core 0 output to ram before mixing Core 1:
+ 	spu2M_WriteFast(0x800 + OutPos, Ext.Left);
+ 	spu2M_WriteFast(0xA00 + OutPos, Ext.Right);
++	SpuTrace::OnCore0Out(Ext.Left, Ext.Right);
+ 
+ #ifdef PCSX2_DEVBUILD
+ 	WaveDump::WriteCore(0, CoreSrc_External, Ext);
+@@ -582,6 +586,7 @@ void spu2Mix()
+ 	WaveDump::WriteCore(1, CoreSrc_External, Out);
+ #endif
+ 
++	SpuTrace::OnMix(Out.Left, Out.Right);
+ 	spu2Output(Out);
+ 
+ 	// Update AutoDMA output positioning
+diff --git a/pcsx2/SPU2/spu2.cpp b/pcsx2/SPU2/spu2.cpp
+index 2c7a5f8..985dc43 100644
+--- a/pcsx2/SPU2/spu2.cpp
++++ b/pcsx2/SPU2/spu2.cpp
+@@ -5,6 +5,7 @@
+ #include "SPU2/defs.h"
+ #include "SPU2/Debug.h"
+ #include "SPU2/Dma.h"
++#include "DebugTools/SpuTrace.h"
+ #include "Host/AudioStream.h"
+ #include "Host.h"
+ #include "GS/GSCapture.h"
+@@ -62,6 +63,7 @@ void SPU2writeDMA4Mem(u16* pMem, u32 size) // size now in 16bit units
+ 
+ 	SPU2::FileLog("[%10d] SPU2 writeDMA4Mem size %x at address %x\n", Cycles, size << 1, Cores[0].TSA);
+ 
++	SpuTrace::OnDma(0, pMem, size);
+ 	Cores[0].DoDMAwrite(pMem, size);
+ }
+ 
+@@ -97,6 +99,7 @@ void SPU2writeDMA7Mem(u16* pMem, u32 size)
+ 
+ 	SPU2::FileLog("[%10d] SPU2 writeDMA7Mem size %x at address %x\n", Cycles, size << 1, Cores[1].TSA);
+ 
++	SpuTrace::OnDma(1, pMem, size);
+ 	Cores[1].DoDMAwrite(pMem, size);
+ }
+ 
+@@ -444,6 +447,7 @@ void SPU2write(u32 rmem, u16 value)
+ 	// incorrect pitches and loop lengths.
+ 
+ 	TimeUpdate(psxRegs.cycle);
++	SpuTrace::OnWrite(rmem, value);
+ 
+ 	if (rmem >> 16 == 0x1f80)
+ 		Cores[0].WriteRegPS1(rmem, value);
 diff --git a/pcsx2/Vif1_Dma.cpp b/pcsx2/Vif1_Dma.cpp
 index c85af24..7402a05 100644
 --- a/pcsx2/Vif1_Dma.cpp
@@ -201,6 +376,31 @@ index c85af24..7402a05 100644
  	VIF_LOG("dmaVIF1 chcr = %lx, madr = %lx, qwc  = %lx\n"
  			"        tadr = %lx, asr0 = %lx, asr1 = %lx",
  		vif1ch.chcr._u32, vif1ch.madr, vif1ch.qwc,
+diff --git a/pcsx2/x86/iR3000A.cpp b/pcsx2/x86/iR3000A.cpp
+index a7d0d7e..539271a 100644
+--- a/pcsx2/x86/iR3000A.cpp
++++ b/pcsx2/x86/iR3000A.cpp
+@@ -6,6 +6,7 @@
+ #include "R3000A.h"
+ #include "BaseblockEx.h"
+ #include "R5900OpcodeTables.h"
++#include "DebugTools/SpuTrace.h"
+ #include "IopBios.h"
+ #include "IopHw.h"
+ #include "Common.h"
+@@ -1327,6 +1328,12 @@ void rpsxBREAK()
+ static bool psxDynarecCheckBreakpoint()
+ {
+ 	u32 pc = psxRegs.pc;
++	if (SpuTrace::g_iopRecProbing)
++	{
++		SpuTrace::IopRecCheck(pc);
++		if (!CBreakPoints::IsAddressBreakPoint(BREAKPOINT_IOP, pc) && !CBreakPoints::IsAddressBreakPoint(BREAKPOINT_IOP, pc + 4))
++			return false;
++	}
+ 	if (CBreakPoints::CheckSkipFirst(BREAKPOINT_IOP, pc) == pc)
+ 	{
+ 		CBreakPoints::ClearSkipFirst(BREAKPOINT_IOP);
 diff --git a/pcsx2/x86/ix86-32/iR5900.cpp b/pcsx2/x86/ix86-32/iR5900.cpp
 index 026197c..071e171 100644
 --- a/pcsx2/x86/ix86-32/iR5900.cpp

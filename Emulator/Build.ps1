@@ -36,8 +36,15 @@ if (-not (Test-Path (Join-Path $Deps 'lib\cmake\Qt6'))) {
     }
 }
 
-foreach ($Name in 'DebugServer.cpp', 'DebugServer.h', 'GifTrace.cpp', 'GifTrace.h') {
-    Copy-Item (Join-Path $PSScriptRoot $Name) (Join-Path $Tree "pcsx2\DebugTools\$Name") -Force
+foreach ($Name in 'DebugServer.cpp', 'DebugServer.h', 'GifTrace.cpp', 'GifTrace.h', 'SpuTrace.cpp', 'SpuTrace.h') {
+    # Copy-Item keeps the source's time, which may be older than the objects built from the last copy:
+    # a changed file is copied and stamped now, so the build sees it.
+    $From = Join-Path $PSScriptRoot $Name
+    $To = Join-Path $Tree "pcsx2\DebugTools\$Name"
+    if (-not (Test-Path $To) -or (Get-FileHash $From).Hash -ne (Get-FileHash $To).Hash) {
+        Copy-Item $From $To -Force
+        (Get-Item $To).LastWriteTime = Get-Date
+    }
 }
 
 & git -C $Tree apply --reverse --check $Hooks 2>$null

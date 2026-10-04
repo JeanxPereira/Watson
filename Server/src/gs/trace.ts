@@ -1,4 +1,5 @@
 import * as fs from 'node:fs';
+import * as zlib from 'node:zlib';
 import { dumpPackets } from '../gsdump.js';
 
 /**
@@ -71,13 +72,19 @@ function advance(source: Source, by: number): Source {
   return { ...source, address: ADDRESSED.has(source.space) ? source.address + by : source.address, size: source.size - by };
 }
 
+/** The bytes of a trace: `<name>.trace.jsonl`, or its `.gz` when only the compressed file is kept. */
+export function readTraceBytes(file: string): Buffer {
+  if (!fs.existsSync(file) && fs.existsSync(`${file}.gz`)) return zlib.gunzipSync(fs.readFileSync(`${file}.gz`));
+  return fs.readFileSync(file);
+}
+
 export function readTrace(file: string): Trace {
   const trace: Trace = { complete: false, frame: 0, origins: new Map(), preroll: [], packets: [], vsyncAt: [], desyncs: [], probes: [], recompiler: false, probeSpec: '', padSpec: '', writeSpec: '', inputs: [] };
   const stop = (reason: string): Trace => ({ ...trace, complete: false, reason });
 
   let data: Buffer;
   try {
-    data = fs.readFileSync(file);
+    data = readTraceBytes(file);
   } catch (error: any) {
     return stop(`cannot read (${error.code ?? error.message})`);
   }

@@ -241,3 +241,15 @@ test('an older trace reads with no probe list and no indices', () => {
   assert.equal(trace.probeSpec, '');
   assert.equal(trace.probes[0].index, undefined);
 });
+
+test('a trace kept only as .gz reads the same as the plain one', async () => {
+  const zlib = await import('node:zlib');
+  const records = [header, gif, data(3, 'dma', 1, 'ee', 0x400000, 16), packet(3, C), vsync, data(3, 'dma', 1, 'ee', 0x400010, 16), packet(3, C)];
+  const plain = traceFile(records);
+  const kept = readTrace(plain);
+  fs.writeFileSync(`${plain}.gz`, zlib.gzipSync(fs.readFileSync(plain)));
+  fs.rmSync(plain);
+  const zipped = readTrace(plain);
+  assert.equal(zipped.complete, true);
+  assert.deepEqual(zipped, kept);
+});

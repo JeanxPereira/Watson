@@ -1262,7 +1262,9 @@ namespace DebugServer
 		// The VM can stop between the check above and the moment the CPU thread gets to this
 		// command, so the CPU thread checks again before touching anything.
 		auto reply = std::make_shared<std::string>();
-		const int patience = (cmd == "pause" || cmd == "resume" || cmd == "gs_read" || cmd == "set_cpu_mode") ? 60000 : 5000;
+		// Commands that write files wait for the disk: a busy one can take seconds to close a large trace.
+		const int patience = (cmd == "pause" || cmd == "resume" || cmd == "gs_read" || cmd == "set_cpu_mode" ||
+			cmd == "spu_trace_start" || cmd == "spu_trace_stop" || cmd == "spu_read") ? 60000 : 5000;
 		const CpuRun ran = runOnCpuThread([jsonLine, cmd, reply]() {
 			*reply = VMManager::HasValidVM()
 				? handleOnCpuThread(jsonLine)

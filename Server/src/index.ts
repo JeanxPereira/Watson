@@ -20,6 +20,8 @@ import { launchAndWait, reusingProbe, kill, systemHost, claimInstance, releaseCl
 import { parseGsDump, formatSummary, TraceRefused } from './gs/parse.js';
 import { walkGsDump } from './gsdump.js';
 import { findConfig, loadCatalog, resolveLaunch, registerState, describeStates, Catalog } from './catalog.js';
+import { takeSpuTrace } from './spu/capture.js';
+import { readSpuTrace, summarizeSpuTrace, sha256 } from './spu/trace.js';
 
 // ===== State =====
 let debugServer: DebugServerClient | null = null;
@@ -173,12 +175,12 @@ server.tool('watson_status', 'Get connection + emulator status.', {},
 // ==========================================================
 //  TOOL: watson_read_memory
 // ==========================================================
-server.tool('watson_read_memory', 'Read PS2 memory. Returns hex dump.',
-  { address: z.string(), length: z.number().min(1).max(4096).default(256), format: z.enum(['hexdump', 'hex', 'u32_array', 'ascii']).default('hexdump') },
-  async ({ address, length, format }) => {
+server.tool('watson_read_memory', 'Read PS2 memory. Returns hex dump. cpu "iop" reads IOP memory (its RAM at 0x00000000-0x001FFFFF), through the DebugServer only.',
+  { address: z.string(), length: z.number().min(1).max(4096).default(256), format: z.enum(['hexdump', 'hex', 'u32_array', 'ascii']).default('hexdump'), cpu: z.enum(['ee', 'iop']).default('ee') },
+  async ({ address, length, format, cpu }) => {
     try {
       const addr = parseAddr(address);
-      const data = await readMem(addr, length);
+      const data = cpu === 'iop' ? await requireDebug().readMemoryBuffer('0x' + addr.toString(16), length, 'iop') : await readMem(addr, length);
       let text: string;
       if (format === 'hexdump') text = hexDump(data, addr);
       else if (format === 'hex') text = data.toString('hex');
@@ -455,13 +457,13 @@ server.tool('watson_get_threads', 'List EE/IOP BIOS threads with their status.',
   }
 );
 
-server.tool('watson_get_modules', 'List loaded IOP modules.',
+server.tool('watson_get_modules', 'List loaded IOP modules with their text address and sizes (an address in a disassembly of the .irx is text address + offset).',
   {},
   async () => {
     if (!hasDebug()) return { content: [{ type: 'text' as const, text: 'Error: DebugServer not connected.' }], isError: true };
     try {
       const mods = await debugServer!.getModules('iop');
-      const lines = mods.map(m => `${m.name} (v${m.version})`);
+      const lines = mods.map(m => `${m.name} (v${m.version}) text ${m.text_addr} +0x${m.text_size.toString(16)} data 0x${m.data_size.toString(16)} bss 0x${m.bss_size.toString(16)} entry ${m.entry} gp ${m.gp}`);
       return { content: [{ type: 'text' as const, text: `${mods.length} modules:\n${lines.join('\n')}` }] };
     } catch (e: any) { return { content: [{ type: 'text' as const, text: `Error: ${e.message}` }], isError: true }; }
   }
@@ -816,6 +818,79 @@ server.tool('watson_gs_read',
       const done = await requireDebug().gsRead(file, offset, length);
       const renderer = done.renderer === 13 ? 'software' : `renderer ${done.renderer} (not the software one: the memory may be stale)`;
       return text(`wrote ${done.bytes} bytes of GS memory from offset 0x${offset.toString(16)} to ${file}; ${renderer}`);
+    } catch (e: any) { return failure(e); }
+  }
+);
+
+// ==========================================================
+//  Sound: SPU2 trace, SPU2 state, IOP probes
+// ==========================================================
+function captureStem(given: string | undefined, stem: string): string {
+  const file = given ?? path.join(CAPTURES, stem);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  return file;
+}
+
+server.tool('watson_spu_trace',
+  'Record, for N frames, every SPU2 register write (after the mixer has caught up with the IOP, so each record names the first output sample it can change), every DMA4/DMA7 start and every copy into SPU2 RAM (address, words, FNV-1a, data), IOP probes, and the mixed output: <stem>.wav (final output, s16 stereo 48 kHz, as PCSX2 hands it to the audio backend before its float conversion) and <stem>.stages.bin (per sample, s32: each core\'s dry, wet, pre- and post-reverb and result, the core 0 output, the final output; fields in the trace header). Records carry the capture frame, the frame counter, the IOP cycle and the sample index; <stem>.spu.jsonl also holds a record at each frame start. Works under either CPU mode; IOP probes fire from the IOP interpreter, or from breakpoint checks the IOP recompiler compiles at their addresses. Leaves the VM paused.',
+  {
+    frames: z.number().int().min(1).max(3600).default(60),
+    path: z.string().optional().describe('Absolute path stem, without extension; default Runtime/captures/spu-<frame>'),
+    probes: z.array(z.object({
+      pc: z.string().describe('IOP program counter, hex. The probe fires before the instruction there executes.'),
+      ranges: z.array(z.string()).default([]).describe('IOP memory to record, each `[*]base[+hex]:hexlength`, as for watson_gif_trace: base is a register name or a hex address; `*` follows the pointer found there. Up to 64, 0x10000 bytes each.'),
+      ...probeWindow,
+    })).max(1024).default([]).describe('Record the IOP registers (32 GPRs, hi, lo) and these ranges each time the IOP reaches a program counter'),
+    pad: padSchedule,
+    wav: z.boolean().default(true).describe('Write the final output as a WAV'),
+    stages: z.boolean().default(true).describe('Write the per-stage streams (96 bytes per sample, about 77 KB per frame)'),
+    dma_data: z.boolean().default(true).describe('Record the words of each DMA copy into SPU2 RAM, not only their hash'),
+  },
+  async ({ frames, path: given, probes, pad, wav, stages, dma_data }) => {
+    try {
+      const client = requireDebug();
+      const frame = (await client.getStatus()).frame;
+      const started = Date.now();
+      const files = await takeSpuTrace(client, captureStem(given, `spu-${frame}`), frames, { probes, pad, wav, stages, dmaData: dma_data });
+      const trace = readSpuTrace(files.trace);
+      const summary = summarizeSpuTrace(trace, files);
+      const seconds = (Date.now() - started) / 1000;
+      return { content: [{ type: 'text' as const, text: `${summary}\ntime: ${seconds.toFixed(1)} s for ${frames} frames` }], ...(trace.complete ? {} : { isError: true }) };
+    } catch (e: any) { return failure(e); }
+  }
+);
+
+server.tool('watson_spu_read',
+  'Write the SPU2 state where the VM stands: <stem>.spuram.bin (the 2 MB of SPU2 RAM, raw), <stem>.spuregs.bin (PCSX2\'s 64 KB register mirror, raw) and <stem>.spustate.json (both cores and their 24 voices: volumes, ADSR, pitch, addresses, decoder state, gates, reverb, DMA state). The mixer runs behind the IOP and is not caught up first (that would move its DMA checks); `pending` in the JSON counts the ticks of 768 IOP cycles it is behind. Pause the VM first (watson_frame_advance leaves it paused).',
+  {
+    path: z.string().optional().describe('Absolute path stem, without extension; default Runtime/captures/spu-state-<frame>'),
+    ram: z.boolean().default(true),
+    regs: z.boolean().default(true),
+    state: z.boolean().default(true),
+  },
+  async ({ path: given, ram, regs, state }) => {
+    try {
+      const client = requireDebug();
+      const frame = (await client.getStatus()).frame;
+      const stem = captureStem(given, `spu-state-${frame}`);
+      const files = {
+        ...(ram ? { ram: `${stem}.spuram.bin` } : {}),
+        ...(regs ? { regs: `${stem}.spuregs.bin` } : {}),
+        ...(state ? { state: `${stem}.spustate.json` } : {}),
+      };
+      const at = await client.spuRead(files);
+      const lines = [`frame ${at}`];
+      if (files.ram) lines.push(`ram: ${files.ram} (sha256 ${sha256(fs.readFileSync(files.ram))})`);
+      if (files.regs) lines.push(`regs: ${files.regs} (sha256 ${sha256(fs.readFileSync(files.regs))})`);
+      if (files.state) {
+        const json = JSON.parse(fs.readFileSync(files.state, 'utf8'));
+        lines.push(`state: ${files.state} (pending ticks ${json.pending})`);
+        for (const core of json.cores) {
+          const live = core.voices.filter((voice: any) => voice.adsr.phase !== 0).map((voice: any) => `v${voice.index}:${voice.adsr.phase}/${voice.adsr.value}`);
+          lines.push(`core ${core.index}: master ${core.masterVol.left.value}/${core.masterVol.right.value}, fx ${core.fxEnable}, voices sounding (phase/envelope) ${live.length ? live.join(' ') : 'none'}`);
+        }
+      }
+      return text(lines.join('\n'));
     } catch (e: any) { return failure(e); }
   }
 );

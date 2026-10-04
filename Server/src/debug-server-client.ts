@@ -86,6 +86,21 @@ export interface MemoryWrite { frame: number; address: string; hex: string }
 /** What a capture applies on its own frame boundaries, on the CPU thread. */
 export interface CaptureSchedule { pad?: PadStep[]; writes?: MemoryWrite[] }
 
+/** What an SPU trace records beside its JSON Lines, and what it applies on its frame boundaries. */
+export interface SpuTraceOptions {
+  /** The final output, s16 stereo at 48 kHz. */
+  wav?: string;
+  /** The per-stage streams, s32 little-endian, fields named in the trace header. */
+  stages?: string;
+  /** IOP probes, in the grammar of the EE probes. */
+  probes?: ProbeSpec[];
+  pad?: PadStep[];
+  /** Whether each DMA copy into SPU2 RAM carries its words (default true). */
+  dmaData?: boolean;
+}
+export interface SpuTotals { writes: number; dmas: number; samples: number; probes: number }
+export interface IopModule { name: string; version: number; text_addr: string; entry: string; gp: string; text_size: number; data_size: number; bss_size: number }
+
 export const PAD_BUTTONS = ['up', 'right', 'down', 'left', 'triangle', 'circle', 'cross', 'square',
   'select', 'start', 'l1', 'l2', 'r1', 'r2', 'l3', 'r3'];
 
@@ -490,6 +505,34 @@ export class DebugServerClient {
   }
 
   /** Write `length` bytes of GS local memory from byte `offset` to `path`, after the GS thread drains. */
+  async spuTraceStart(path: string, options: SpuTraceOptions = {}): Promise<{ iopRecompiler: boolean }> {
+    const probes = probeString(options.probes ?? []);
+    const pad = padString(options.pad ?? []);
+    const resp = await this.send({
+      cmd: 'spu_trace_start', path: DebugServerClient.wirePath(path),
+      ...(options.wav ? { wav: DebugServerClient.wirePath(options.wav) } : {}),
+      ...(options.stages ? { stages: DebugServerClient.wirePath(options.stages) } : {}),
+      ...(probes ? { probes } : {}), ...(pad ? { pad } : {}),
+      dma_data: options.dmaData ?? true,
+    });
+    if (!resp.ok) throw new Error(resp.error);
+    return { iopRecompiler: Boolean(resp.iop_recompiler) };
+  }
+
+  async spuTraceStop(): Promise<SpuTotals> {
+    const resp = await this.send({ cmd: 'spu_trace_stop' });
+    if (!resp.ok) throw new Error(resp.error);
+    return { writes: resp.writes, dmas: resp.dmas, samples: resp.samples, probes: resp.probes };
+  }
+
+  /** SPU2 RAM (2 MB), the register mirror (64 KB) and the cores' state (JSON), each to its own file. */
+  async spuRead(files: { ram?: string; regs?: string; state?: string }): Promise<number> {
+    const wire = (file?: string) => (file ? DebugServerClient.wirePath(file) : '');
+    const resp = await this.send({ cmd: 'spu_read', ram: wire(files.ram), regs: wire(files.regs), state: wire(files.state) });
+    if (!resp.ok) throw new Error(resp.error);
+    return resp.frame;
+  }
+
   async gsRead(path: string, offset = 0, length = 4 * 1024 * 1024): Promise<{ renderer: number; bytes: number }> {
     const resp = await this.send({ cmd: 'gs_read', path: DebugServerClient.wirePath(path), offset, length });
     if (!resp.ok) throw new Error(resp.error);
@@ -523,7 +566,7 @@ export class DebugServerClient {
     return resp.threads;
   }
 
-  async getModules(cpu: CpuTarget = 'iop'): Promise<Array<{ name: string; version: number }>> {
+  async getModules(cpu: CpuTarget = 'iop'): Promise<IopModule[]> {
     const resp = await this.send({ cmd: 'get_modules', cpu });
     if (!resp.ok) throw new Error(resp.error);
     return resp.modules;

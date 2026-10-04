@@ -10,11 +10,11 @@ test('the server exposes the inherited, lifecycle and navigation tools, all name
   const names = tools.map((t) => t.name).sort();
   await client.close();
 
-  assert.equal(names.length, 43);
+  assert.equal(names.length, 45);
   assert.deepEqual(names.filter((n) => !n.startsWith('watson_')), []);
   for (const n of ['watson_connect', 'watson_status', 'watson_read_registers', 'watson_get_backtrace',
     'watson_launch', 'watson_kill', 'watson_frame_advance', 'watson_pad', 'watson_snapshot', 'watson_gs_dump',
-    'watson_save_state_file', 'watson_load_state_file', 'watson_states', 'watson_state_save', 'watson_gsdump_parse', 'watson_gif_trace', 'watson_frame_capture', 'watson_gs_read', 'watson_set_cpu_mode']) {
+    'watson_save_state_file', 'watson_load_state_file', 'watson_states', 'watson_state_save', 'watson_gsdump_parse', 'watson_gif_trace', 'watson_frame_capture', 'watson_gs_read', 'watson_set_cpu_mode', 'watson_spu_trace', 'watson_spu_read']) {
     assert.ok(names.includes(n), `missing ${n}`);
   }
 });

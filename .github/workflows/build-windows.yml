@@ -1,0 +1,211 @@
+name: Build Watson (Windows)
+
+# Builds PCSX2 with Watson's hooks at one PCSX2 commit, runs the server's offline tests and, when
+# asked, packages a release archive. The dependency handling follows PCSX2's own Windows CI: the
+# deps directory is cached under the hash of build-dependencies.bat and its patches.
+
+on:
+  workflow_call:
+    inputs:
+      pcsx2_sha:
+        description: PCSX2 commit to build; empty for the one pinned in Emulator/upstream.json
+        type: string
+        default: ""
+      pcsx2_label:
+        description: PCSX2 version in names (a tag, or g<sha>)
+        type: string
+        default: pinned
+      deps:
+        description: "prebuilt: PCSX2's published dependency archive; source: build-dependencies.bat"
+        type: string
+        default: prebuilt
+      package:
+        type: boolean
+        default: false
+    outputs:
+      archive:
+        description: File name of the packaged archive
+        value: ${{ jobs.build.outputs.archive }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: PCSX2 ${{ inputs.pcsx2_label }}
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 180
+    env:
+      POWERSHELL_TELEMETRY_OPTOUT: 1
+    outputs:
+      archive: ${{ steps.package.outputs.archive }}
+    steps:
+      # hooks.patch is LF; a CRLF checkout of PCSX2 would refuse it.
+      - name: Keep line endings as committed
+        run: git config --global core.autocrlf false
+
+      - name: Check out Watson
+        uses: actions/checkout@v7
+        with:
+          path: watson
+
+      - name: Resolve the PCSX2 commit
+        id: pcsx2
+        shell: pwsh
+        env:
+          REQUESTED: ${{ inputs.pcsx2_sha }}
+        run: |
+          $Pin = Get-Content watson/Emulator/upstream.json -Raw | ConvertFrom-Json
+          $Sha = if ($env:REQUESTED) { $env:REQUESTED } else { $Pin.commit }
+          if ($Sha -notmatch '^[0-9a-f]{40}$') { throw "not a full commit id: $Sha" }
+          "sha=$Sha" >> $env:GITHUB_OUTPUT
+          "dependencies=$($Pin.dependencies)" >> $env:GITHUB_OUTPUT
+
+      - name: Check out PCSX2
+        uses: actions/checkout@v7
+        with:
+          repository: PCSX2/pcsx2
+          ref: ${{ steps.pcsx2.outputs.sha }}
+          path: pcsx2
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Apply the hooks
+        shell: pwsh
+        run: |
+          python watson/Emulator/ApplyHooks.py pcsx2 --report hooks-report.md
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          git -C pcsx2 add -A
+          git -C pcsx2 diff --cached --full-index --output=../watson-applied.patch
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          git -C pcsx2 restore --staged .
+
+      - name: Dependency cache key
+        id: deps
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MODE: ${{ inputs.deps }}
+        run: |
+          $Stamp = 'tree'
+          if ($env:MODE -eq 'prebuilt') {
+            $Stamp = gh api repos/PCSX2/pcsx2-windows-dependencies/releases/tags/latest-windows-dependencies --jq '.assets[] | select(.name == "pcsx2-windows-dependencies.7z") | .updated_at'
+            if (-not $Stamp) { throw 'no pcsx2-windows-dependencies.7z in latest-windows-dependencies' }
+            $Stamp = $Stamp -replace '[^0-9TZ]', ''
+          } elseif ($env:MODE -ne 'source') { throw "deps must be prebuilt or source, not $env:MODE" }
+          "stamp=$Stamp" >> $env:GITHUB_OUTPUT
+
+      - name: Cache dependencies
+        id: cache-deps
+        uses: actions/cache@v6
+        with:
+          path: pcsx2/deps
+          key: watson windows-2025-vs2026 x64 deps ${{ inputs.deps }} ${{ steps.deps.outputs.stamp }} ${{ hashFiles('pcsx2/.github/workflows/scripts/windows/build-dependencies.bat', 'pcsx2/.github/workflows/scripts/common/*.patch') }}
+
+      - name: Download prebuilt dependencies
+        if: steps.cache-deps.outputs.cache-hit != 'true' && inputs.deps == 'prebuilt'
+        shell: pwsh
+        env:
+          URL: ${{ steps.pcsx2.outputs.dependencies }}
+        run: |
+          curl.exe -L --fail --retry 3 -o deps.7z $env:URL
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          & 'C:\Program Files\7-Zip\7z.exe' x -y -opcsx2 deps.7z | Out-Null
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Build dependencies
+        if: steps.cache-deps.outputs.cache-hit != 'true' && inputs.deps == 'source'
+        env:
+          DEBUG: 0
+        run: pcsx2/.github/workflows/scripts/windows/build-dependencies.bat
+
+      - name: Check dependencies
+        shell: pwsh
+        run: if (-not (Test-Path pcsx2/deps/lib/cmake/Qt6)) { throw 'pcsx2/deps has no lib/cmake/Qt6' }
+
+      - name: Download game patches
+        shell: pwsh
+        run: |
+          curl.exe -L --fail --retry 3 -o pcsx2/bin/resources/patches.zip https://github.com/PCSX2/pcsx2_patches/releases/latest/download/patches.zip
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Locate vcvars
+        shell: cmd
+        run: |
+          for /f "usebackq tokens=*" %%i in (`call vswhere -latest -property installationPath`) do set "VSINSTPATH=%%i"
+          echo VCVARSPATH=%VSINSTPATH%\VC\Auxiliary\Build\vcvars64.bat>>%GITHUB_ENV%
+
+      - name: Build PCSX2 with Watson
+        shell: cmd
+        run: |
+          call "%VCVARSPATH%" || exit /b
+          cmake -S pcsx2 -B pcsx2\build -G Ninja -DCMAKE_BUILD_TYPE=Release -DQT_BUILD=ON -DDISABLE_ADVANCE_SIMD=ON -DENABLE_GSRUNNER=ON "-DCMAKE_PREFIX_PATH=%cd%\pcsx2\deps" || exit /b
+          cmake --build pcsx2\build --config Release || exit /b
+          cmake --install pcsx2\build --config Release || exit /b
+          if not exist pcsx2\bin\pcsx2-qt.exe exit /b 1
+          if not exist pcsx2\bin\pcsx2-gsrunner.exe exit /b 1
+
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: watson/Server/package-lock.json
+
+      - name: Server offline tests
+        working-directory: watson/Server
+        run: |
+          npm ci
+          npm test
+
+      - name: Package
+        id: package
+        if: inputs.package
+        shell: pwsh
+        env:
+          LABEL: ${{ inputs.pcsx2_label }}
+          PCSX2_SHA: ${{ steps.pcsx2.outputs.sha }}
+          WATSON_SHA: ${{ github.sha }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          $Version = (Get-Content watson/Server/package.json -Raw | ConvertFrom-Json).version
+          $Name = "Watson-$Version-pcsx2-$env:LABEL-windows-x64"
+          $Stage = Join-Path $PWD "stage/$Name"
+          New-Item -ItemType Directory -Force "$Stage/PCSX2", "$Stage/Server", "$Stage/Emulator" | Out-Null
+
+          Copy-Item pcsx2/bin/* "$Stage/PCSX2" -Recurse
+          Get-ChildItem "$Stage/PCSX2" -Recurse -File -Include *.pdb, *.lib, *.exp, *.ilk, *.iobj, *.ipdb, *.bsc | Remove-Item
+          Copy-Item watson/Server/dist "$Stage/Server/dist" -Recurse
+          Copy-Item watson/Server/package.json, watson/Server/package-lock.json "$Stage/Server"
+          Push-Location "$Stage/Server"
+          npm ci --omit=dev --ignore-scripts
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          Pop-Location
+          Copy-Item watson/Emulator/Run.ps1 "$Stage/Emulator"
+          Copy-Item watson/LICENSE "$Stage/LICENSE"
+          Copy-Item watson-applied.patch "$Stage/watson-applied.patch"
+
+          $Readme = Get-Content watson/.github/release/README.txt -Raw
+          $Readme = $Readme.Replace('@VERSION@', $Version).Replace('@LABEL@', $env:LABEL).Replace('@PCSX2_SHA@', $env:PCSX2_SHA)
+          $Readme = $Readme.Replace('@WATSON_SHA@', $env:WATSON_SHA).Replace('@REPOSITORY@', $env:REPOSITORY)
+          Set-Content -NoNewline -Encoding utf8NoBOM "$Stage/README.txt" $Readme
+
+          & 'C:\Program Files\7-Zip\7z.exe' a -tzip -mx=7 "$Name.zip" "./stage/$Name" | Out-Null
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          "archive=$Name.zip" >> $env:GITHUB_OUTPUT
+
+      - name: Upload the package
+        if: inputs.package
+        uses: actions/upload-artifact@v7
+        with:
+          name: watson-release
+          path: |
+            ${{ steps.package.outputs.archive }}
+            watson-applied.patch
+            hooks-report.md
+          if-no-files-found: error
+          retention-days: 7

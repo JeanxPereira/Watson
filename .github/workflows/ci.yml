@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  server:
+    name: Server offline tests
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: Server/package-lock.json
+      - name: Test
+        working-directory: Server
+        run: |
+          npm ci
+          npm test
+
+  hooks:
+    name: Hooks apply on the pinned PCSX2
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: watson
+      - name: Pinned commit
+        id: pin
+        run: echo "sha=$(jq -r .commit watson/Emulator/upstream.json)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v7
+        with:
+          repository: PCSX2/pcsx2
+          ref: ${{ steps.pin.outputs.sha }}
+          path: pcsx2
+          persist-credentials: false
+      - name: Apply
+        run: python3 watson/Emulator/ApplyHooks.py pcsx2
+
+  build:
+    name: Build
+    needs: [server, hooks]
+    uses: ./.github/workflows/build-windows.yml
+    with:
+      pcsx2_label: pinned

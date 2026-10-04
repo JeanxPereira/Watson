@@ -1,0 +1,218 @@
+name: Track PCSX2
+
+# Every day: take the newest PCSX2 release, put Watson's hooks into it and, when they apply,
+# build, test and publish watson-<watson version>-pcsx2-<pcsx2 tag>. See
+# docs/superpowers/specs/2026-10-04-watson-releases-design.md.
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+    inputs:
+      pcsx2_ref:
+        description: PCSX2 tag, branch or commit; empty for the newest release of the channel
+        type: string
+        default: ""
+      channel:
+        description: "Where the newest release comes from when no ref is given"
+        type: choice
+        options: [nightly, stable]
+        default: nightly
+      deps:
+        description: "Windows dependencies: PCSX2's prebuilt archive, or built from the tree's script"
+        type: choice
+        options: [prebuilt, source]
+        default: prebuilt
+
+permissions:
+  contents: read
+
+concurrency:
+  group: track-pcsx2
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    name: Resolve the PCSX2 version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+      label: ${{ steps.resolve.outputs.label }}
+      prerelease: ${{ steps.resolve.outputs.prerelease }}
+      version: ${{ steps.resolve.outputs.version }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      skip: ${{ steps.resolve.outputs.skip }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: Server/package.json
+          sparse-checkout-cone-mode: false
+      - name: Resolve
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF: ${{ inputs.pcsx2_ref }}
+          CHANNEL: ${{ inputs.channel || 'nightly' }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ -z "$REF" ]; then
+            if [ "$CHANNEL" = stable ]; then
+              REF=$(gh api repos/PCSX2/pcsx2/releases/latest --jq .tag_name)
+            else
+              REF=$(gh api 'repos/PCSX2/pcsx2/releases?per_page=1' --jq '.[0].tag_name')
+            fi
+          fi
+          if ! [[ "$REF" =~ ^[A-Za-z0-9._/-]+$ ]]; then echo "::error::bad PCSX2 ref: $REF"; exit 1; fi
+          SHA=$(gh api "repos/PCSX2/pcsx2/commits/$REF" --jq .sha)
+          if gh api "repos/PCSX2/pcsx2/git/ref/tags/$REF" > /dev/null 2>&1; then
+            LABEL=$REF
+            PRERELEASE=$(gh api "repos/PCSX2/pcsx2/releases/tags/$REF" --jq .prerelease 2> /dev/null || echo true)
+          else
+            LABEL="g${SHA:0:9}"
+            PRERELEASE=true
+          fi
+          VERSION=$(jq -r .version Server/package.json)
+          TAG="watson-$VERSION-pcsx2-$LABEL"
+          SKIP=false
+          if gh release view "$TAG" --repo "$REPOSITORY" > /dev/null 2>&1; then SKIP=true; fi
+          {
+            echo "sha=$SHA"
+            echo "label=$LABEL"
+            echo "prerelease=$PRERELEASE"
+            echo "version=$VERSION"
+            echo "tag=$TAG"
+            echo "skip=$SKIP"
+          } >> "$GITHUB_OUTPUT"
+          echo "PCSX2 $REF = $LABEL ($SHA), prerelease $PRERELEASE; release $TAG exists: $SKIP" >> "$GITHUB_STEP_SUMMARY"
+
+  hooks:
+    name: Apply the hooks
+    needs: resolve
+    if: needs.resolve.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: watson
+      - uses: actions/checkout@v7
+        with:
+          repository: PCSX2/pcsx2
+          ref: ${{ needs.resolve.outputs.sha }}
+          path: pcsx2
+          persist-credentials: false
+      - name: Apply
+        id: apply
+        run: python3 watson/Emulator/ApplyHooks.py pcsx2 --report hooks-report.md
+      - name: Report in an issue
+        if: failure() && steps.apply.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          LABEL: ${{ needs.resolve.outputs.label }}
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: bash watson/.github/release/upsert-issue.sh "Hooks do not apply on PCSX2 $LABEL" hooks-report.md
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: hooks-report
+          path: hooks-report.md
+          if-no-files-found: ignore
+
+  build:
+    name: Build
+    needs: [resolve, hooks]
+    uses: ./.github/workflows/build-windows.yml
+    with:
+      pcsx2_sha: ${{ needs.resolve.outputs.sha }}
+      pcsx2_label: ${{ needs.resolve.outputs.label }}
+      deps: ${{ inputs.deps || 'prebuilt' }}
+      package: true
+
+  release:
+    name: Publish the release
+    needs: [resolve, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: .github/release
+      - uses: actions/download-artifact@v8
+        with:
+          name: watson-release
+          path: out
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          SERVER: ${{ github.server_url }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+          LABEL: ${{ needs.resolve.outputs.label }}
+          PCSX2_SHA: ${{ needs.resolve.outputs.sha }}
+          PRERELEASE: ${{ needs.resolve.outputs.prerelease }}
+          ARCHIVE: ${{ needs.build.outputs.archive }}
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --repo "$REPOSITORY" > /dev/null 2>&1; then
+            echo "$TAG already exists; leaving it as it is"
+            exit 0
+          fi
+          {
+            echo "Watson $VERSION built on PCSX2 $LABEL, for Windows x64."
+            echo
+            echo "## Source (GPL-3.0)"
+            echo
+            echo "- Watson: [\`${GITHUB_SHA:0:9}\`]($SERVER/$REPOSITORY/tree/$GITHUB_SHA)"
+            if [ "${LABEL:0:1}" = g ]; then
+              echo "- PCSX2: [\`${PCSX2_SHA:0:9}\`](https://github.com/PCSX2/pcsx2/tree/$PCSX2_SHA)"
+            else
+              echo "- PCSX2: [$LABEL](https://github.com/PCSX2/pcsx2/releases/tag/$LABEL) ([\`${PCSX2_SHA:0:9}\`](https://github.com/PCSX2/pcsx2/tree/$PCSX2_SHA))"
+            fi
+            echo "- \`watson-applied.patch\` (attached, and inside the archive) is the complete change made to that PCSX2 commit: Watson's sources under \`pcsx2/DebugTools\` and its hooks."
+            echo
+            echo "## How the hooks went in"
+            echo
+            echo '~~~'
+            cat out/hooks-report.md
+            echo '~~~'
+            echo
+            echo "Built by [this run]($RUN). Usage: README.txt in the archive."
+          } > notes.md
+          FLAGS=()
+          if [ "$PRERELEASE" = true ]; then FLAGS+=(--prerelease); fi
+          gh release create "$TAG" --repo "$REPOSITORY" --target "$GITHUB_SHA" \
+            --title "Watson $VERSION on PCSX2 $LABEL" --notes-file notes.md "${FLAGS[@]}" \
+            "out/$ARCHIVE" out/watson-applied.patch
+
+  build-failed:
+    name: Report a failed build
+    needs: [resolve, build]
+    if: failure() && needs.build.result == 'failure'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: .github/release
+      - name: Report in an issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          LABEL: ${{ needs.resolve.outputs.label }}
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          printf 'The hooks apply on PCSX2 %s, but the Windows build or the offline tests fail.\n' "$LABEL" > report.md
+          bash .github/release/upsert-issue.sh "Watson does not build on PCSX2 $LABEL" report.md
